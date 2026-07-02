@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "score": 1,
+  "model": "claude-code-demo",
+  "task": "edit-pdf",
+  "source": "Claude Code JSONL"
+}

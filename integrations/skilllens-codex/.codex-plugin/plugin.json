@@ -1,0 +1,22 @@
+{
+  "name": "skilllens-codex",
+  "version": "0.1.0",
+  "description": "Launch SkillLens from Codex and capture sessions for skill coverage analysis.",
+  "author": {
+    "name": "SkillLens"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "SkillLens Codex",
+    "shortDescription": "Open SkillLens for Codex skill coverage.",
+    "longDescription": "SkillLens Codex launches the browser viewer from Codex, packages Codex session traces, loaded SKILL.md files, task metadata, and result metadata into a SkillLens capture bundle, then runs coverage analysis.",
+    "developerName": "SkillLens",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "defaultPrompt": [
+      "/skilllens",
+      "Open SkillLens for this Codex session.",
+      "Analyze this skill with SkillLens."
+    ]
+  }
+}

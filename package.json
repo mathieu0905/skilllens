@@ -1,0 +1,39 @@
+{
+  "name": "skilllens",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Visual coverage for agent skills.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mathieu0905/skilllens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mathieu0905/skilllens/issues"
+  },
+  "homepage": "https://github.com/mathieu0905/skilllens#readme",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "capture": "tsx scripts/capture.ts",
+    "open": "tsx scripts/open.ts",
+    "analyze": "tsx scripts/analyze.ts",
+    "codex": "tsx scripts/codex.ts",
+    "install:codex-prompt": "tsx scripts/install-codex-prompt.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "tsx": "^4.22.4"
+  }
+}

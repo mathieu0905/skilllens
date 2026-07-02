@@ -1,0 +1,7 @@
+{
+  "success": false,
+  "score": 0.3,
+  "model": "codex-demo",
+  "task": "edit-pdf",
+  "source": "Codex JSONL"
+}

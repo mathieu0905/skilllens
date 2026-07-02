@@ -1,0 +1,4 @@
+interface:
+  display_name: "SkillScope Analyzer"
+  short_description: "Stage skill constraints and trace evidence"
+  default_prompt: "Use $skillscope-analyzer to analyze this selected SkillScope skill-use window."
