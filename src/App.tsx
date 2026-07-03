@@ -3870,7 +3870,16 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
               </button>
             ))
           ) : (
-            <p className="muted stream-empty">{locale === "zh" ? "当前过滤条件下没有任务。" : "No jobs match this filter."}</p>
+            <JobEmptyState
+              filter={filter}
+              query={query}
+              metrics={metrics}
+              onClearQuery={() => setQuery("")}
+              onShowActive={() => setFilter("active")}
+              onShowRecent={() => setFilter("recent")}
+              onShowDocker={() => setFilter("docker")}
+              onRefresh={() => setReloadNonce((value) => value + 1)}
+            />
           )}
         </div>
       </div>
@@ -3886,11 +3895,109 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
             onStop={() => executeStop(selectedJob)}
           />
         ) : (
-          <div className="monitor-panel job-detail-empty">
-            <strong>{locale === "zh" ? "没有任务" : "No job selected"}</strong>
-          </div>
+          <JobDetailEmpty
+            filter={filter}
+            query={query}
+            metrics={metrics}
+            onClearQuery={() => setQuery("")}
+            onShowRecent={() => setFilter("recent")}
+            onRefresh={() => setReloadNonce((value) => value + 1)}
+          />
         )}
       </aside>
+    </div>
+  );
+}
+
+function JobEmptyState({
+  filter,
+  query,
+  metrics,
+  onClearQuery,
+  onShowActive,
+  onShowRecent,
+  onShowDocker,
+  onRefresh
+}: {
+  filter: "active" | "recent" | "stale" | "docker";
+  query: string;
+  metrics: { active: number; stale: number; recent: number; dockerJobs: number };
+  onClearQuery: () => void;
+  onShowActive: () => void;
+  onShowRecent: () => void;
+  onShowDocker: () => void;
+  onRefresh: () => void;
+}) {
+  const hasQuery = Boolean(query.trim());
+  return (
+    <div className="job-empty-state">
+      <strong>{hasQuery ? "No matching jobs" : jobEmptyTitle(filter)}</strong>
+      <p>{hasQuery ? `Nothing matched "${query.trim()}". Try a shorter artifact name, container name, or command.` : jobEmptyMessage(filter, metrics)}</p>
+      <div className="job-empty-actions">
+        {hasQuery ? (
+          <button className="secondary-button" onClick={onClearQuery}>
+            Clear search
+          </button>
+        ) : null}
+        {filter !== "active" && metrics.active ? (
+          <button className="secondary-button" onClick={onShowActive}>
+            Show active
+          </button>
+        ) : null}
+        {filter !== "recent" && metrics.recent ? (
+          <button className="secondary-button" onClick={onShowRecent}>
+            Show recent
+          </button>
+        ) : null}
+        {filter !== "docker" && metrics.dockerJobs ? (
+          <button className="secondary-button" onClick={onShowDocker}>
+            Show Docker
+          </button>
+        ) : null}
+        <button className="secondary-button" onClick={onRefresh}>
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function JobDetailEmpty({
+  filter,
+  query,
+  metrics,
+  onClearQuery,
+  onShowRecent,
+  onRefresh
+}: {
+  filter: "active" | "recent" | "stale" | "docker";
+  query: string;
+  metrics: { recent: number };
+  onClearQuery: () => void;
+  onShowRecent: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="monitor-panel job-detail-empty">
+      <strong>{query.trim() ? "Search has no selected job" : "No job selected"}</strong>
+      <p>{query.trim() ? "Clear the search or pick another filter to inspect a job." : jobEmptyMessage(filter, metrics)}</p>
+      <div className="job-empty-actions">
+        {query.trim() ? (
+          <button className="secondary-button" onClick={onClearQuery}>
+            Clear search
+          </button>
+        ) : null}
+        {filter !== "recent" && metrics.recent ? (
+          <button className="secondary-button" onClick={onShowRecent}>
+            Show recent
+          </button>
+        ) : null}
+        <button className="secondary-button" onClick={onRefresh}>
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+      </div>
     </div>
   );
 }
@@ -4068,6 +4175,36 @@ function jobStatusLabel(job: AgentJob): string {
     return "Cleanup issue";
   }
   return "Recent";
+}
+
+function jobEmptyTitle(filter: "active" | "recent" | "stale" | "docker"): string {
+  if (filter === "active") {
+    return "No active jobs";
+  }
+  if (filter === "recent") {
+    return "No recent jobs";
+  }
+  if (filter === "stale") {
+    return "No stale jobs";
+  }
+  return "No Docker jobs";
+}
+
+function jobEmptyMessage(filter: "active" | "recent" | "stale" | "docker", metrics: { recent?: number; active?: number; dockerJobs?: number }): string {
+  if (filter === "active") {
+    return metrics.recent
+      ? "Nothing is running right now. Recent jobs are still available for review."
+      : "Start a Codex or Claude benchmark, experiment, or long-running command and it will appear here.";
+  }
+  if (filter === "recent") {
+    return "Stopped or completed jobs will appear here after they leave Active.";
+  }
+  if (filter === "stale") {
+    return "No tracked job has gone quiet for more than 30 seconds.";
+  }
+  return metrics.active
+    ? "Active jobs are running, but none currently have Docker containers attached."
+    : "Docker jobs appear here when a tracked task starts a detached container or compose-backed workload.";
 }
 
 function jobStatusMessage(job: AgentJob): string {

@@ -2713,6 +2713,36 @@ textarea {
   padding: 14px;
 }
 
+.job-empty-state {
+  grid-column: 1 / -1;
+  border: 1px dashed #cbd4df;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.job-empty-state strong,
+.job-detail-empty strong {
+  display: block;
+  color: #243246;
+  font-size: 15px;
+}
+
+.job-empty-state p,
+.job-detail-empty p {
+  margin: 6px 0 0;
+  color: #66778a;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.job-empty-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .job-technical-details {
   border-top: 1px solid #e3e8ef;
 }
