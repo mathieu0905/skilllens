@@ -22,6 +22,14 @@ export type AnalysisMethod = "heuristic" | "llm_judge" | "hybrid";
 
 export type CaptureSource = "codex_plugin" | "claude_code_plugin" | "manual_upload" | "skillsbench";
 
+export type CoverageTarget =
+  | "process"
+  | "final_output"
+  | "artifact"
+  | "tool_use"
+  | "reporting"
+  | "unknown";
+
 export type SkillConstraintKind =
   | "action"
   | "prohibition"
@@ -88,7 +96,9 @@ export interface CoverageFinding {
     text: string;
     severity: string;
     span: SourceSpan;
+    target?: CoverageTarget;
   };
+  target?: CoverageTarget;
   status: CoverageStatus;
   confidence: number;
   rationale: string;
@@ -98,6 +108,15 @@ export interface CoverageFinding {
   candidateEventIds: string[];
   analysisMethod?: AnalysisMethod;
   analysisRecipe?: string;
+  nativeEvidence?: NativeVerifierEvidence[];
+}
+
+export interface NativeVerifierEvidence {
+  source: "skillsbench_verifier" | "ctrf" | "result_json" | "user_supplied" | string;
+  status: "passed" | "failed" | "unknown";
+  testName?: string;
+  message?: string;
+  trace?: string;
 }
 
 export type SkillGraphNodeKind =

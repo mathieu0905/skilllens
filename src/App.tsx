@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
@@ -12,12 +13,13 @@ import {
   HelpCircle,
   Link2,
   ListFilter,
+  PencilLine,
   RefreshCw,
   Search,
   Upload,
   XCircle
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { demoProjects, sampleInputs } from "./data/samples";
 import { analyzeCoverage, findCandidates, summarizeCoverage } from "./lib/coverage";
 import { createProject, createProjectFromCaptureBundle } from "./lib/project";
@@ -37,8 +39,9 @@ import type {
   TraceEvent
 } from "./lib/types";
 
-type View = "coverage" | "graph" | "timeline" | "compare" | "analysis" | "report";
+type View = "coverage" | "graph" | "timeline" | "compare" | "analysis" | "monitor" | "rewrite" | "report";
 type TimelineFilter = "all" | "skill" | "violations" | "tools" | "final";
+type Locale = "zh" | "en";
 
 const TIMELINE_PAGE_SIZE = 120;
 
@@ -161,12 +164,21 @@ interface AgentAnalysisAudit {
   constraintSeedPath?: string;
   traceEventsPath?: string;
   traceFactsPath?: string;
+  rawTracePath?: string;
   progressPath?: string;
   constraintsPath?: string;
   rawOutputPath?: string;
   responsePath?: string;
   findingsPath?: string;
   skillGraphPath?: string;
+  optimizerSkillPath?: string;
+  optimizationPromptPath?: string;
+  optimizedSkillPath?: string;
+  optimizationReportPath?: string;
+  optimizationDiffPath?: string;
+  optimizationPacketPath?: string;
+  optimizerRawOutputPath?: string;
+  optimizedSkill?: string;
   steps?: Array<{ label: string; detail?: string; durationMs?: number }>;
   judgedCount?: number;
   structuredJudgments?: number;
@@ -178,6 +190,45 @@ interface AgentLiveEvent {
   at: string;
   payload: unknown;
 }
+
+interface AgentProcessEvent {
+  id: string;
+  requestId?: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  pid?: number;
+  ppid?: number;
+  pgid?: number;
+  agentRootPid?: number;
+  agentRootCommand?: "codex" | "claude" | "unknown";
+  agentRootLabel?: string;
+  association?: "ancestor" | "process_group" | "self" | "unlinked";
+  status: "started" | "running" | "exited" | "failed" | "killed";
+  startedAt: string;
+  endedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  outputPath?: string;
+  promptPath?: string;
+  tracePath?: string;
+  traceSize?: number;
+  traceMtime?: string;
+  error?: string;
+}
+
+interface TraceTailState {
+  path: string;
+  offset: number;
+  nextOffset: number;
+  size: number;
+  mtime: string;
+  content: string;
+  updatedAt: string;
+  error?: string;
+}
+
+const LocaleContext = createContext<Locale>("zh");
 
 const statusMeta: Record<
   CoverageStatus,
@@ -193,22 +244,384 @@ const statusMeta: Record<
   unknown: { label: "待判断", icon: HelpCircle }
 };
 
-const viewLabels: Array<{ id: View; label: string; icon: typeof FileText }> = [
-  { id: "coverage", label: "Skill 高亮", icon: FileText },
-  { id: "graph", label: "Skill 图", icon: GitBranch },
-  { id: "timeline", label: "轨迹", icon: ListFilter },
-  { id: "compare", label: "对比", icon: GitCompare },
-  { id: "analysis", label: "分析过程", icon: Code2 },
-  { id: "report", label: "报告", icon: FileJson }
-];
-
-const timelineFilterLabels: Record<TimelineFilter, string> = {
-  all: "全部",
-  skill: "相关",
-  violations: "违反/忽略",
-  tools: "工具",
-  final: "最后"
+const copy = {
+  zh: {
+    tagline: "像代码覆盖率一样看 agent skills。",
+    languageToggle: "EN",
+    exportJson: "导出 JSON",
+    status: {
+      covered: "遵循",
+      missed: "忽略",
+      violated: "违反",
+      not_applicable: "未走",
+      unknown: "待判断"
+    } satisfies Record<CoverageStatus, string>,
+    views: {
+      coverage: "Skill 高亮",
+      graph: "Skill 图",
+      timeline: "轨迹",
+      compare: "对比",
+      analysis: "分析过程",
+      monitor: "进程监控",
+      rewrite: "优化 Skill",
+      report: "报告"
+    } satisfies Record<View, string>,
+    timelineFilters: {
+      all: "全部",
+      skill: "相关",
+      violations: "违反/忽略",
+      tools: "工具",
+      final: "最后"
+    } satisfies Record<TimelineFilter, string>,
+    home: {
+      title: "选择一次 Skill 使用",
+      subtitle: "左侧选项目，右侧选 skill 使用窗口。每个窗口只截取该 skill 使用到结束或下一次人类介入的轨迹。",
+      indexMissing: "本地索引未加载",
+      refresh: "刷新索引",
+      demo: "打开 demo",
+      searchPlaceholder: "搜索项目、路径、skill、用户请求或 session",
+      allProjects: "全部用了 skill 的项目",
+      skillUseColumn: "Skill 使用窗口",
+      indexing: "正在索引本机 skill 使用记录...",
+      noSkillUses: "没有找到可证明使用了 skill 的 Codex / Claude Code 片段。",
+      open: "打开",
+      opening: "opening..."
+    },
+    opening: {
+      title: "正在打开 skill 使用窗口",
+      note: "只加载这个 skill-use 片段；coverage 判定会在点击“启动分析”后运行。"
+    },
+    app: {
+      back: "返回列表",
+      currentWindow: "当前窗口",
+      analyzing: "分析中...",
+      startAnalysis: "启动分析",
+      reanalyze: "重新分析",
+      import: "导入",
+      localArtifacts: "本地文件",
+      analyzeUpload: "分析上传",
+      importUrl: "导入 URL",
+      switchCapture: "切换 capture / 片段",
+      sessionSegments: "Session 片段",
+      fullSession: "完整 session",
+      constraints: "constraints",
+      needsJudge: "待启动 agent judge",
+      applicable: "适用",
+      skippedBranchesCollapsed: "未走分支 {count} 已折叠",
+      confidence: "置信度",
+      viewHighlights: "查看高亮"
+    },
+    coverage: {
+      judgmentEvidence: "判断与证据",
+      skillConstraint: "Skill 约束",
+      evidenceSpans: "证据片段",
+      noDirectEvidence: "没有直接证据。",
+      localCandidates: "本地候选轨迹",
+      rewrite: "改写建议",
+      manualReview: "人工修正",
+      selectConstraint: "选择一条高亮约束。",
+      priority: "优先看",
+      source: "SKILL.md 原文",
+      needsReview: "待看",
+      noFinding: "No coverage finding was generated.",
+      noEvidenceTooltip: "No evidence span. Click for details."
+    },
+    graph: {
+      skippedBranches: "未走分支",
+      sourceDerived: "从 coverage findings 自动推断",
+      condition: "条件",
+      tracePath: "Trace 路径",
+      currentNode: "当前节点",
+      evidenceEvents: "证据事件",
+      noEvidence: "这个节点没有直接证据事件。",
+      empty: "还没有可绘制的 skill graph。",
+      takenConditions: "走过的条件",
+      noTakenConditions: "没有识别到已走条件。",
+      noSkippedBranches: "没有未走分支。",
+      branchNotTaken: "未走分支",
+      branchTaken: "已走条件",
+      branchUnknown: "路径未知",
+      branchChecked: "已检查",
+      kind: {
+        action: "动作",
+        prohibition: "禁止",
+        order: "顺序",
+        numeric: "数值",
+        command: "命令",
+        file_reference: "文件",
+        evidence: "证据",
+        condition: "条件",
+        other: "约束"
+      } as Record<string, string>
+    },
+    timeline: {
+      loadMore: "展开更多事件",
+      details: "事件详情",
+      relatedConstraints: "关联 Skill 约束",
+      noRelated: "没有关联约束。",
+      selectEvent: "选择一个轨迹事件。"
+    },
+    analysis: {
+      defaultStep: "等待启动分析",
+      defaultStepDetail: "点击右上角“启动分析”后，这里会显示 Codex / Claude judge 的执行过程。",
+      running: "正在分析",
+      failed: "分析失败",
+      done: "分析完成",
+      title: "分析过程",
+      intro: "前端选择 skill-use 后，由本地 Codex / Claude Code 完成约束抽取和证据判断。",
+      final: "Agent 最终分析",
+      realtime: "Agent 实时输出",
+      rawEvent: "原始事件",
+      cachedEmpty: "这次命中缓存，没有启动 Codex / Claude，所以没有实时 agent 输出。点击“重新分析”可以强制启动 agent。",
+      waitingContent: "Codex / Claude 输出实际内容后，会在这里显示。",
+      debugFiles: "本地调试文件",
+      debugEmpty: "分析启动后会显示 request、prompt、原始输出和解析结果的文件路径。",
+      cacheHit: "命中分析缓存",
+      cacheHitBody: "这次没有重新启动 agent，直接读取已保存的分析结果。",
+      createThread: "创建分析线程",
+      startTurn: "开始一轮判断",
+      startTurnBody: "Agent 开始读取 judge 请求。",
+      stepDone: "完成一步",
+      retrying: "上游连接重试中",
+      log: "运行日志",
+      output: "输出",
+      error: "出错",
+      toolCall: "调用工具",
+      agentOutput: "Agent 输出",
+      structured: "Agent 返回结构化判断",
+      content: "Agent 输出分析内容",
+      search: "检索事件",
+      toolDone: "工具完成",
+      unnamedConstraint: "未命名约束",
+      judgments: "条判断"
+    },
+    rewrite: {
+      title: "优化后的 Skill 草案",
+      subtitle: "根据当前 violated / ignored findings 反向生成；每条改写都保留证据来源，适合人工确认后再合并回 SKILL.md。",
+      emptyTitle: "还没有足够证据生成改写",
+      emptyBody: "先运行 agent 分析，或选择一个已有 violated / ignored findings 的 skill-use window。",
+      copy: "复制 Markdown",
+      download: "下载 optimized-skill.md",
+      source: "证据来源",
+      violated: "需要收紧的违反点",
+      missed: "需要前置或具体化的忽略点",
+      proposedPatch: "建议追加/替换的 Skill 片段",
+      noEvidence: "没有证据事件"
+    },
+    sessionLibrary: {
+      title: "Session Library",
+      subtitle: "选择任意项目的 Codex / Claude Code session",
+      allProjects: "全部项目"
+    }
+  },
+  en: {
+    tagline: "Like code coverage, but for agent skills.",
+    languageToggle: "中文",
+    exportJson: "Export JSON",
+    status: {
+      covered: "Followed",
+      missed: "Ignored",
+      violated: "Violated",
+      not_applicable: "Not taken",
+      unknown: "Needs review"
+    } satisfies Record<CoverageStatus, string>,
+    views: {
+      coverage: "Skill Highlight",
+      graph: "Skill Graph",
+      timeline: "Trace",
+      compare: "Compare",
+      analysis: "Analysis",
+      monitor: "Monitor",
+      rewrite: "Rewrite Skill",
+      report: "Report"
+    } satisfies Record<View, string>,
+    timelineFilters: {
+      all: "All",
+      skill: "Skill-linked",
+      violations: "Violated/Ignored",
+      tools: "Tools",
+      final: "Final"
+    } satisfies Record<TimelineFilter, string>,
+    home: {
+      title: "Choose A Skill Use",
+      subtitle: "Pick a project on the left, then one skill-use window on the right. Each window spans from the skill use to completion or the next human intervention.",
+      indexMissing: "Local index not loaded",
+      refresh: "Refresh Index",
+      demo: "Open Demo",
+      searchPlaceholder: "Search projects, paths, skills, user requests, or sessions",
+      allProjects: "All projects with skill use",
+      skillUseColumn: "Skill-Use Windows",
+      indexing: "Indexing local skill-use records...",
+      noSkillUses: "No provable Codex / Claude Code skill-use windows were found.",
+      open: "Open",
+      opening: "opening..."
+    },
+    opening: {
+      title: "Opening skill-use window",
+      note: "Only this skill-use segment is loaded; coverage judgment runs after you click Start Analysis."
+    },
+    app: {
+      back: "Back",
+      currentWindow: "Current Window",
+      analyzing: "Analyzing...",
+      startAnalysis: "Start Analysis",
+      reanalyze: "Reanalyze",
+      import: "Import",
+      localArtifacts: "Local Artifacts",
+      analyzeUpload: "Analyze Upload",
+      importUrl: "Import URL",
+      switchCapture: "Switch capture / segment",
+      sessionSegments: "Session Segments",
+      fullSession: "Full session",
+      constraints: "constraints",
+      needsJudge: "Agent judge pending",
+      applicable: "Applicable",
+      skippedBranchesCollapsed: "{count} not-taken branches folded",
+      confidence: "Confidence",
+      viewHighlights: "View Highlights"
+    },
+    coverage: {
+      judgmentEvidence: "Judgment And Evidence",
+      skillConstraint: "Skill Constraint",
+      evidenceSpans: "Evidence Spans",
+      noDirectEvidence: "No direct evidence.",
+      localCandidates: "Local Candidate Trace Events",
+      rewrite: "Rewrite Suggestion",
+      manualReview: "Manual Review",
+      selectConstraint: "Select a highlighted constraint.",
+      priority: "Review first",
+      source: "SKILL.md Source",
+      needsReview: "Review",
+      noFinding: "No coverage finding was generated.",
+      noEvidenceTooltip: "No evidence span. Click for details."
+    },
+    graph: {
+      skippedBranches: "Not-Taken Branches",
+      sourceDerived: "Derived from coverage findings",
+      condition: "Condition",
+      tracePath: "Trace Path",
+      currentNode: "Current Node",
+      evidenceEvents: "Evidence Events",
+      noEvidence: "This node has no direct evidence event.",
+      empty: "No drawable skill graph yet.",
+      takenConditions: "Taken Conditions",
+      noTakenConditions: "No taken conditions detected.",
+      noSkippedBranches: "No not-taken branches.",
+      branchNotTaken: "Not taken",
+      branchTaken: "Taken",
+      branchUnknown: "Path unknown",
+      branchChecked: "Checked",
+      kind: {
+        action: "Action",
+        prohibition: "Prohibition",
+        order: "Order",
+        numeric: "Numeric",
+        command: "Command",
+        file_reference: "File",
+        evidence: "Evidence",
+        condition: "Condition",
+        other: "Constraint"
+      } as Record<string, string>
+    },
+    timeline: {
+      loadMore: "Load More Events",
+      details: "Event Details",
+      relatedConstraints: "Related Skill Constraints",
+      noRelated: "No related constraints.",
+      selectEvent: "Select a trace event."
+    },
+    analysis: {
+      defaultStep: "Waiting To Start",
+      defaultStepDetail: "After you click Start Analysis, Codex / Claude judge progress appears here.",
+      running: "Analyzing",
+      failed: "Analysis Failed",
+      done: "Analysis Complete",
+      title: "Analysis Process",
+      intro: "After the frontend selects a skill-use window, local Codex / Claude Code extracts constraints and judges evidence.",
+      final: "Agent Final Analysis",
+      realtime: "Agent Live Output",
+      rawEvent: "Raw Event",
+      cachedEmpty: "This run hit cache, so no live agent output exists. Click Reanalyze to force a new agent run.",
+      waitingContent: "Codex / Claude output with actual content will appear here.",
+      debugFiles: "Local Debug Files",
+      debugEmpty: "After analysis starts, request, prompt, raw output, and parsed result paths appear here.",
+      cacheHit: "Analysis Cache Hit",
+      cacheHitBody: "This run reused saved analysis instead of starting the agent.",
+      createThread: "Created Analysis Thread",
+      startTurn: "Started Judge Turn",
+      startTurnBody: "Agent started reading the judge request.",
+      stepDone: "Step Complete",
+      retrying: "Upstream reconnecting",
+      log: "Runtime Log",
+      output: "Output",
+      error: "Error",
+      toolCall: "Tool Call",
+      agentOutput: "Agent Output",
+      structured: "Agent Returned Structured Judgments",
+      content: "Agent Analysis Content",
+      search: "Search Event",
+      toolDone: "Tool Complete",
+      unnamedConstraint: "Unnamed constraint",
+      judgments: "judgments"
+    },
+    rewrite: {
+      title: "Optimized Skill Draft",
+      subtitle: "Generated from current violated / ignored findings with evidence references, intended for human review before merging back into SKILL.md.",
+      emptyTitle: "Not enough evidence to draft a rewrite",
+      emptyBody: "Run agent analysis first, or open a skill-use window with violated / ignored findings.",
+      copy: "Copy Markdown",
+      download: "Download optimized-skill.md",
+      source: "Evidence Source",
+      violated: "Violation points to tighten",
+      missed: "Ignored points to make earlier or more concrete",
+      proposedPatch: "Suggested Skill Snippet",
+      noEvidence: "No evidence event"
+    },
+    sessionLibrary: {
+      title: "Session Library",
+      subtitle: "Select any Codex / Claude Code session from any project",
+      allProjects: "All projects"
+    }
+  }
 };
+
+const viewIcons: Record<View, typeof FileText> = {
+  coverage: FileText,
+  graph: GitBranch,
+  timeline: ListFilter,
+  compare: GitCompare,
+  analysis: Code2,
+  monitor: Activity,
+  rewrite: PencilLine,
+  report: FileJson
+};
+
+function initialLocale(): Locale {
+  if (typeof window === "undefined") {
+    return "zh";
+  }
+  const saved = window.localStorage.getItem("skilllens.locale");
+  if (saved === "zh" || saved === "en") {
+    return saved;
+  }
+  return window.navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function useLocale(): Locale {
+  return useContext(LocaleContext);
+}
+
+function ui(locale: Locale) {
+  return copy[locale];
+}
+
+function statusLabel(status: CoverageStatus, locale: Locale): string {
+  return ui(locale).status[status];
+}
+
+function viewLabelsFor(locale: Locale): Array<{ id: View; label: string; icon: typeof FileText }> {
+  return (Object.keys(viewIcons) as View[]).map((id) => ({ id, label: ui(locale).views[id], icon: viewIcons[id] }));
+}
 
 function initialViewFromUrl(): View {
   if (typeof window === "undefined") {
@@ -220,12 +633,16 @@ function initialViewFromUrl(): View {
     value === "timeline" ||
     value === "compare" ||
     value === "analysis" ||
+    value === "monitor" ||
+    value === "rewrite" ||
     value === "report"
     ? value
     : "coverage";
 }
 
 function App() {
+  const [locale, setLocale] = useState<Locale>(() => initialLocale());
+  const t = ui(locale);
   const [projects, setProjects] = useState<SkillLensProject[]>([]);
   const [projectId, setProjectId] = useState("");
   const [compareId, setCompareId] = useState("");
@@ -251,7 +668,7 @@ function App() {
   const [localProjectKey, setLocalProjectKey] = useState("all");
   const [localIndexMeta, setLocalIndexMeta] = useState<LocalSessionIndexMeta>({});
   const [isLoadingLocalSessions, setIsLoadingLocalSessions] = useState(true);
-  const [isHome, setIsHome] = useState(true);
+  const [isHome, setIsHome] = useState(() => initialViewFromUrl() !== "monitor");
   const [capturingSkillUseId, setCapturingSkillUseId] = useState("");
   const [openingSkillUse, setOpeningSkillUse] = useState<LocalSkillUse | null>(null);
   const [isAgentAnalyzing, setIsAgentAnalyzing] = useState(false);
@@ -260,6 +677,8 @@ function App() {
   const [analysisSteps, setAnalysisSteps] = useState<AnalysisStep[]>([]);
   const [analysisAudit, setAnalysisAudit] = useState<AgentAnalysisAudit | null>(null);
   const [agentEvents, setAgentEvents] = useState<AgentLiveEvent[]>([]);
+  const [agentProcesses, setAgentProcesses] = useState<AgentProcessEvent[]>([]);
+  const [traceTails, setTraceTails] = useState<Record<string, TraceTailState>>({});
   const [libraryError, setLibraryError] = useState("");
   const sessionSegments = Array.isArray(project.result.sessionSegments)
     ? (project.result.sessionSegments as Array<{ id: string; title: string; startStep: number; endStep: number }>)
@@ -303,6 +722,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    window.localStorage.setItem("skilllens.locale", locale);
+  }, [locale]);
+
+  useEffect(() => {
     if (view === "compare" && projects.length < 2) {
       setView("coverage");
     }
@@ -332,8 +755,8 @@ function App() {
     return localSkillUses.filter((use) => use.projectKey === localProjectKey);
   }, [localProjectKey, localSkillUses]);
   const visibleViewLabels = useMemo(
-    () => viewLabels.filter((item) => item.id !== "compare" || projects.length > 1),
-    [projects.length]
+    () => viewLabelsFor(locale).filter((item) => item.id !== "compare" || projects.length > 1),
+    [locale, projects.length]
   );
 
   function analyzeCustom(sourceType: SkillLensProject["sourceType"] = "upload", sourceUrl?: string) {
@@ -396,7 +819,7 @@ function App() {
       .filter(Boolean)
       .join(" / ");
     const cachedAnalysis = await loadCachedAgentAnalysis(id, options);
-    if (cachedAnalysis?.findings?.length) {
+      if (cachedAnalysis?.findings?.length) {
       const cachedSkillGraph = skillGraphFromUnknown(cachedAnalysis.skillGraph);
       imported.findings = cachedAnalysis.findings;
       imported.result = {
@@ -410,7 +833,11 @@ function App() {
         }
       };
       setAnalysisAudit(cachedAnalysis);
-      setAgentAnalysisMessage(`已从本地缓存恢复 ${cachedAnalysis.findings.length} 条分析结果。`);
+      setAgentAnalysisMessage(
+        locale === "zh"
+          ? `已从本地缓存恢复 ${cachedAnalysis.findings.length} 条分析结果。`
+          : `Restored ${cachedAnalysis.findings.length} analysis findings from local cache.`
+      );
     }
     setProjects((current) => {
       const withoutDuplicate = current.filter((candidate) => candidate.id !== imported.id);
@@ -524,17 +951,50 @@ function App() {
     setAgentAnalysisMessage("");
     setAnalysisAudit(null);
     setAgentEvents([]);
+    setAgentProcesses([]);
+    setTraceTails({});
     setView("analysis");
     setAnalysisSteps([
-      { label: "发送分析请求", status: "running", detail: "把当前 skill-use window 交给本地后端。" },
-      { label: "准备 agent 输入", status: "pending", detail: "写入 selected-skill、trace-events 和 analyzer skill 启动指令。" },
-      { label: "运行 Codex / Claude", status: "pending", detail: "启动本地 agent，按 analyzer skill 抽取约束并检查 trace。" },
-      { label: "保存结果", status: "pending", detail: "保存 agent 产物，并更新 skill 高亮和证据。" }
+      {
+        label: locale === "zh" ? "发送分析请求" : "Send analysis request",
+        status: "running",
+        detail: locale === "zh" ? "把当前 skill-use window 交给本地后端。" : "Send the current skill-use window to the local backend."
+      },
+      {
+        label: locale === "zh" ? "准备 agent 输入" : "Prepare agent inputs",
+        status: "pending",
+        detail:
+          locale === "zh"
+            ? "写入 selected-skill、trace-events 和 analyzer skill 启动指令。"
+            : "Write selected-skill, trace-events, and analyzer-skill launch instructions."
+      },
+      {
+        label: locale === "zh" ? "运行 Codex / Claude" : "Run Codex / Claude",
+        status: "pending",
+        detail:
+          locale === "zh"
+            ? "启动本地 agent，按 analyzer skill 抽取约束并检查 trace。"
+            : "Start the local agent, extract constraints with the analyzer skill, and inspect the trace."
+      },
+      {
+        label: locale === "zh" ? "保存结果" : "Save results",
+        status: "pending",
+        detail: locale === "zh" ? "保存 agent 产物，并更新 skill 高亮和证据。" : "Save agent artifacts and update highlights/evidence."
+      }
     ]);
     const captureId = project.id.startsWith("capture-") ? project.id.replace(/^capture-/, "") : "";
     if (!captureId) {
-      setAgentAnalysisError("只能对从 Codex / Claude Code session 打开的 skill-use 启动 agent 分析。");
-      setAnalysisSteps((current) => markLastStepError(current, "当前页面不是本地 Codex / Claude Code capture。"));
+      setAgentAnalysisError(
+        locale === "zh"
+          ? "只能对从 Codex / Claude Code session 打开的 skill-use 启动 agent 分析。"
+          : "Agent analysis can only run on a skill-use opened from a Codex / Claude Code session."
+      );
+      setAnalysisSteps((current) =>
+        markLastStepError(
+          current,
+          locale === "zh" ? "当前页面不是本地 Codex / Claude Code capture。" : "The current page is not a local Codex / Claude Code capture."
+        )
+      );
       return;
     }
     setIsAgentAnalyzing(true);
@@ -553,7 +1013,9 @@ function App() {
     const source = new EventSource(`/api/agent-analysis/stream?${params.toString()}`);
 
     source.addEventListener("open", () => {
-      setAnalysisSteps((current) => markStepDone(current, "发送分析请求", "SSE stream connected."));
+      setAnalysisSteps((current) =>
+        markStepDone(current, locale === "zh" ? "发送分析请求" : "Send analysis request", "SSE stream connected.")
+      );
     });
     source.addEventListener("step", (event) => {
       const step = parseEventData<{ label: string; detail?: string; durationMs?: number }>(event);
@@ -569,6 +1031,13 @@ function App() {
     source.addEventListener("agent-text", (event) => {
       const payload = parseEventData<{ stream?: string; text?: string }>(event);
       setAgentEvents((current) => [...current.slice(-199), { kind: "text", at: new Date().toISOString(), payload }]);
+    });
+    source.addEventListener("agent-process", (event) => {
+      const payload = parseEventData<AgentProcessEvent>(event);
+      if (!payload?.id) {
+        return;
+      }
+      setAgentProcesses((current) => upsertAgentProcess(current, payload));
     });
     source.addEventListener("constraints", (event) => {
       const payload = parseEventData<{ findings: CoverageFinding[]; extractedCount?: number; constraintsPath?: string }>(event);
@@ -594,13 +1063,23 @@ function App() {
         )
       );
       setSelectedUnitId(payload.findings[0]?.unitId ?? selectedUnitId);
-      setAgentAnalysisMessage(`已同步 ${payload.extractedCount ?? payload.findings.length} 条约束到 Skill 高亮。`);
+      setAgentAnalysisMessage(
+        locale === "zh"
+          ? `已同步 ${payload.extractedCount ?? payload.findings.length} 条约束到 Skill 高亮。`
+          : `Synced ${payload.extractedCount ?? payload.findings.length} constraints to Skill Highlight.`
+      );
       setAgentEvents((current) => [
         ...current.slice(-199),
         {
           kind: "text",
           at: new Date().toISOString(),
-          payload: { stream: "stdout", text: `已识别 ${payload.extractedCount ?? payload.findings.length} 条约束，Skill 高亮已更新。` }
+          payload: {
+            stream: "stdout",
+            text:
+              locale === "zh"
+                ? `已识别 ${payload.extractedCount ?? payload.findings.length} 条约束，Skill 高亮已更新。`
+                : `Extracted ${payload.extractedCount ?? payload.findings.length} constraints; Skill Highlight has been updated.`
+          }
         }
       ]);
     });
@@ -637,7 +1116,10 @@ function App() {
           at: new Date().toISOString(),
           payload: {
             stream: "stdout",
-            text: `Skill 图已更新：${skillGraph.nodes.length} 个节点，${skillGraph.edges.length} 条边，${skillGraph.paths.length} 条路径。`
+            text:
+              locale === "zh"
+                ? `Skill 图已更新：${skillGraph.nodes.length} 个节点，${skillGraph.edges.length} 条边，${skillGraph.paths.length} 条路径。`
+                : `Skill Graph updated: ${skillGraph.nodes.length} nodes, ${skillGraph.edges.length} edges, ${skillGraph.paths.length} paths.`
           }
         }
       ]);
@@ -657,7 +1139,7 @@ function App() {
       }
       const skillGraph = skillGraphFromUnknown(payload.skillGraph);
       setAnalysisAudit(payload);
-      setAnalysisSteps(stepsFromAudit(payload, "done"));
+      setAnalysisSteps(stepsFromAudit(payload, "done", undefined, locale));
       setProjects((current) =>
         current.map((candidate) =>
           candidate.id === activeProjectId
@@ -691,9 +1173,9 @@ function App() {
       const payload = parseEventData<{ error?: string; audit?: AgentAnalysisAudit }>(event);
       if (payload?.audit) {
         setAnalysisAudit(payload.audit);
-        setAnalysisSteps(stepsFromAudit(payload.audit, "error", payload.error ?? "Agent analysis failed."));
+        setAnalysisSteps(stepsFromAudit(payload.audit, "error", payload.error ?? "Agent analysis failed.", locale));
       } else {
-        setAnalysisSteps((current) => markLastStepError(current, payload?.error ?? "Agent analysis failed."));
+        setAnalysisSteps((current) => markLastStepError(current, payload?.error ?? "Agent analysis failed.", locale));
       }
       setAgentAnalysisError(payload?.error ?? "Agent analysis failed.");
       setIsAgentAnalyzing(false);
@@ -701,10 +1183,35 @@ function App() {
     });
     source.onerror = () => {
       setAgentAnalysisError("Agent analysis stream disconnected.");
-      setAnalysisSteps((current) => markLastStepError(current, "Agent analysis stream disconnected."));
+      setAnalysisSteps((current) => markLastStepError(current, "Agent analysis stream disconnected.", locale));
       setIsAgentAnalyzing(false);
       source.close();
     };
+  }
+
+  async function killAgentProcess(processEvent: AgentProcessEvent) {
+    try {
+      const response = await fetch("/api/agent-processes/kill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: processEvent.id, pid: processEvent.pid, signal: "SIGTERM" })
+      });
+      if (!response.ok) {
+        const error = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(error?.error ?? `HTTP ${response.status}`);
+      }
+      const payload = (await response.json()) as AgentProcessEvent;
+      setAgentProcesses((current) => upsertAgentProcess(current, payload));
+    } catch (error) {
+      setAgentEvents((current) => [
+        ...current.slice(-199),
+        {
+          kind: "text",
+          at: new Date().toISOString(),
+          payload: { stream: "stderr", text: error instanceof Error ? error.message : "Failed to kill process." }
+        }
+      ]);
+    }
   }
 
   async function importTrialUrl() {
@@ -766,20 +1273,28 @@ function App() {
   }
 
   return (
+    <LocaleContext.Provider value={locale}>
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
           <Code2 size={22} />
           <div>
-            <h1>SkillLens</h1>
-            <p>Like code coverage, but for agent skills.</p>
+            <h1>SkillScope</h1>
+            <p>{t.tagline}</p>
           </div>
         </div>
         <div className="topbar-actions">
           <span className="adapter-pill">Codex</span>
           <span className="adapter-pill">Claude Code</span>
           <span className="adapter-pill">ACP JSONL</span>
-          <button className="icon-button" onClick={() => downloadFile(`${project.name}.analysis.json`, exportAnalysisJson(project), "application/json")} title="Export JSON">
+          <button
+            className="secondary-button compact"
+            onClick={() => setLocale((current) => (current === "zh" ? "en" : "zh"))}
+            title="Language"
+          >
+            {t.languageToggle}
+          </button>
+          <button className="icon-button" onClick={() => downloadFile(`${project.name}.analysis.json`, exportAnalysisJson(project), "application/json")} title={t.exportJson}>
             <Download size={18} />
           </button>
         </div>
@@ -807,6 +1322,11 @@ function App() {
               setCompareId(demoProjects[1].id);
               setIsHome(false);
             }}
+            onOpenMonitor={() => {
+              setView("monitor");
+              setIsHome(false);
+              window.history.replaceState(null, "", `${window.location.pathname}?view=monitor`);
+            }}
           />
         ) : openingSkillUse ? (
           <OpeningPanel skillUse={openingSkillUse} />
@@ -817,38 +1337,43 @@ function App() {
               className="secondary-button"
               onClick={() => {
                 setIsHome(true);
+                setView("coverage");
                 window.history.replaceState(null, "", window.location.pathname);
               }}
             >
               <ArrowLeft size={16} />
-              返回列表
+              {t.app.back}
             </button>
             <div className="analysis-title-block">
-              <span>当前窗口</span>
-              <h2>{analysisDisplayTitle(focusedProject)}</h2>
+              <span>{t.app.currentWindow}</span>
+              <h2>{view === "monitor" ? t.views.monitor : analysisDisplayTitle(focusedProject)}</h2>
               <p>
-                {currentSkillTitle(focusedProject)} · {String(project.result.source ?? project.sourceType)} · {formatResult(project.result.success)}
+                {view === "monitor"
+                  ? locale === "zh"
+                    ? "同一个 SkillScope 服务中的第二个功能：监控本机 agent / 批处理 / docker 相关进程。"
+                    : "Second function in the same SkillScope service: monitor local agent / batch / docker-related processes."
+                  : `${currentSkillTitle(focusedProject)} · ${String(project.result.source ?? project.sourceType)} · ${formatResult(project.result.success)}`}
               </p>
             </div>
             <div className="analysis-actions">
-              <button className="secondary-button" onClick={() => startAgentAnalysis(false)} disabled={isAgentAnalyzing}>
+              {view !== "monitor" ? <button className="secondary-button" onClick={() => startAgentAnalysis(false)} disabled={isAgentAnalyzing}>
                 <Code2 size={16} />
-                {isAgentAnalyzing ? "分析中..." : "启动分析"}
-              </button>
-              <button className="secondary-button" onClick={() => startAgentAnalysis(true)} disabled={isAgentAnalyzing}>
+                {isAgentAnalyzing ? t.app.analyzing : t.app.startAnalysis}
+              </button> : null}
+              {view !== "monitor" ? <button className="secondary-button" onClick={() => startAgentAnalysis(true)} disabled={isAgentAnalyzing}>
                 <RefreshCw size={16} />
-                重新分析
-              </button>
+                {t.app.reanalyze}
+              </button> : null}
               <details className="import-drawer">
                 <summary>
                   <Upload size={16} />
-                  导入
+                  {t.app.import}
                 </summary>
                 <div className="import-drawer-body">
                   <div className="import-card wide">
                     <div className="section-title">
                       <Upload size={16} />
-                      Local artifacts
+                      {t.app.localArtifacts}
                     </div>
                     <input value={customName} onChange={(event) => setCustomName(event.target.value)} aria-label="Project name" />
                     <div className="file-row">
@@ -864,7 +1389,7 @@ function App() {
                     </div>
                     <button className="primary-button" onClick={() => analyzeCustom("upload")}>
                       <Search size={16} />
-                      Analyze Upload
+                      {t.app.analyzeUpload}
                     </button>
                   </div>
                   <div className="import-card">
@@ -874,7 +1399,7 @@ function App() {
                     </div>
                     <input value={trialUrl} onChange={(event) => setTrialUrl(event.target.value)} placeholder="Raw trial JSONL URL" />
                     <button className="secondary-button" onClick={importTrialUrl}>
-                      导入 URL
+                      {t.app.importUrl}
                     </button>
                     {importError ? <p className="error-text">{importError}</p> : null}
                   </div>
@@ -883,42 +1408,42 @@ function App() {
             </div>
           </div>
 
-          <div className="analysis-subbar">
+          {view !== "monitor" ? <div className="analysis-subbar">
             <span>{focusedProject.traceFormat.replace("_", " ")}</span>
             <span>
               {focusedProject.events.length} / {project.events.length} events
             </span>
-            <span>{activeSegment ? activeSegment.title : "当前窗口"}</span>
+            <span>{activeSegment ? activeSegment.title : t.app.currentWindow}</span>
             {hasAgentJudged(focusedProject) ? (
               <>
-                <span className="summary-good">遵循 {summary.counts.covered}</span>
-                <span className="summary-risk">违反 {summary.counts.violated}</span>
-                <span className="summary-ignore">忽略 {summary.counts.missed}</span>
-                <span>适用 {summary.applicable}</span>
-                {summary.counts.not_applicable ? <span>未走分支 {summary.counts.not_applicable} 已折叠</span> : null}
-                <span>置信度 {percent(summary.averageConfidence)}</span>
+                <span className="summary-good">{t.status.covered} {summary.counts.covered}</span>
+                <span className="summary-risk">{t.status.violated} {summary.counts.violated}</span>
+                <span className="summary-ignore">{t.status.missed} {summary.counts.missed}</span>
+                <span>{t.app.applicable} {summary.applicable}</span>
+                {summary.counts.not_applicable ? <span>{t.app.skippedBranchesCollapsed.replace("{count}", String(summary.counts.not_applicable))}</span> : null}
+                <span>{t.app.confidence} {percent(summary.averageConfidence)}</span>
               </>
             ) : (
               <>
-                <span>{summary.total} constraints</span>
-                <span className="needs-judge">待启动 agent judge</span>
+                <span>{summary.total} {t.app.constraints}</span>
+                <span className="needs-judge">{t.app.needsJudge}</span>
               </>
             )}
-          </div>
+          </div> : null}
           {agentAnalysisError ? <p className="error-text analysis-message">{agentAnalysisError}</p> : null}
           {agentAnalysisMessage ? (
             <div className="analysis-message analysis-message-row">
               <span>{agentAnalysisMessage}</span>
-              {agentAnalysisMessage.includes("Skill 高亮") ? (
+              {agentAnalysisMessage.includes("Skill 高亮") || agentAnalysisMessage.includes("Skill Highlight") ? (
                 <button className="secondary-button compact" onClick={() => setView("coverage")}>
-                  查看高亮
+                  {t.app.viewHighlights}
                 </button>
               ) : null}
             </div>
           ) : null}
           {captures.length || sessionSegments.length ? (
             <details className="context-drawer">
-              <summary>切换 capture / 片段</summary>
+              <summary>{t.app.switchCapture}</summary>
               {captures.length ? (
                 <SessionLibrary
                   captures={visibleCaptures}
@@ -931,9 +1456,9 @@ function App() {
               ) : null}
               {sessionSegments.length ? (
                 <div className="segment-strip">
-                  <span>Session 片段</span>
+                  <span>{t.app.sessionSegments}</span>
                   <button className={activeSegmentId === "all" ? "active" : ""} onClick={() => setActiveSegmentId("all")}>
-                    完整 session · {project.events.length} events
+                    {t.app.fullSession} · {project.events.length} events
                   </button>
                   {sessionSegments.slice(-12).map((segment) => (
                     <button
@@ -1025,14 +1550,23 @@ function App() {
               steps={analysisSteps}
               audit={analysisAudit}
               agentEvents={agentEvents}
+              agentProcesses={agentProcesses}
+              traceTails={traceTails}
+              onKillProcess={killAgentProcess}
+              onTraceTail={setTraceTails}
             />
           ) : null}
+
+          {view === "monitor" ? <SystemMonitorView onKillProcess={killAgentProcess} /> : null}
+
+          {view === "rewrite" ? <RewriteView project={focusedProject} audit={analysisAudit} /> : null}
 
           {view === "report" ? <ReportView project={focusedProject} /> : null}
         </section>
         )}
       </main>
     </div>
+    </LocaleContext.Provider>
   );
 }
 
@@ -1047,7 +1581,8 @@ function SessionHome({
   onProjectChange,
   onRefresh,
   onOpenSkillUse,
-  onOpenDemo
+  onOpenDemo,
+  onOpenMonitor
 }: {
   skillUses: LocalSkillUse[];
   projects: LocalProject[];
@@ -1060,7 +1595,10 @@ function SessionHome({
   onRefresh: () => void;
   onOpenSkillUse: (skillUse: LocalSkillUse) => void;
   onOpenDemo: () => void;
+  onOpenMonitor: () => void;
 }) {
+  const locale = useLocale();
+  const t = ui(locale);
   const [query, setQuery] = useState("");
   const totalSkillUses = projects.reduce((sum, project) => sum + project.skillUseCount, 0);
   const normalizedQuery = query.trim().toLowerCase();
@@ -1078,32 +1616,36 @@ function SessionHome({
     <section className="session-home">
       <div className="session-home-head">
         <div>
-          <h2>选择一次 Skill 使用</h2>
-          <p>左侧选项目，右侧选 skill 使用窗口。每个窗口只截取该 skill 使用到结束或下一次人类介入的轨迹。</p>
+          <h2>{t.home.title}</h2>
+          <p>{t.home.subtitle}</p>
           <small className="index-meta">
-            {indexMeta.updatedAt ? `${projects.length} projects · ${totalSkillUses} skill uses · ${formatShortDate(indexMeta.updatedAt)} · ${indexMeta.source ?? "db"}` : "本地索引未加载"}
+            {indexMeta.updatedAt ? `${projects.length} projects · ${totalSkillUses} skill uses · ${formatShortDate(indexMeta.updatedAt)} · ${indexMeta.source ?? "db"}` : t.home.indexMissing}
           </small>
         </div>
         <div className="session-home-actions">
           <button className="secondary-button" onClick={onRefresh} disabled={loading}>
             <RefreshCw size={16} />
-            刷新索引
+            {t.home.refresh}
+          </button>
+          <button className="secondary-button" onClick={onOpenMonitor}>
+            <Activity size={16} />
+            {t.views.monitor}
           </button>
           <button className="secondary-button" onClick={onOpenDemo}>
-            打开 demo
+            {t.home.demo}
           </button>
         </div>
       </div>
 
       <div className="session-search">
         <Search size={16} />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目、路径、skill、用户请求或 session" />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.home.searchPlaceholder} />
       </div>
 
       <div className="project-session-layout">
         <aside className="local-projects">
           <button className={selectedProjectKey === "all" ? "active" : ""} onClick={() => onProjectChange("all")}>
-            <strong>全部用了 skill 的项目</strong>
+            <strong>{t.home.allProjects}</strong>
             <span>{totalSkillUses} skill uses</span>
           </button>
           {visibleProjects.map((project) => (
@@ -1124,10 +1666,10 @@ function SessionHome({
         </aside>
 
         <div className="local-sessions">
-          <div className="column-title">Skill 使用窗口</div>
+          <div className="column-title">{t.home.skillUseColumn}</div>
           {error ? <p className="error-text session-error">{error}</p> : null}
           {loading ? (
-            <p className="muted empty-sessions">正在索引本机 skill 使用记录...</p>
+            <p className="muted empty-sessions">{t.home.indexing}</p>
           ) : visibleSkillUses.length ? (
             visibleSkillUses.slice(0, 120).map((use) => {
               const isOpening = capturingSkillUseId === use.id;
@@ -1145,13 +1687,13 @@ function SessionHome({
                   <span>{use.worktreeLabel ?? use.agentProduct}</span>
                   <small>steps {use.startStep}-{use.endStep}</small>
                   <small>{shortSessionTitle(use.sessionId)} · {formatShortDate(use.updatedAt)}</small>
-                  <em>{isOpening ? "opening..." : "打开"}</em>
+                  <em>{isOpening ? t.home.opening : t.home.open}</em>
                 </div>
               </button>
               );
             })
           ) : (
-            <p className="muted empty-sessions">没有找到可证明使用了 skill 的 Codex / Claude Code 片段。</p>
+            <p className="muted empty-sessions">{t.home.noSkillUses}</p>
           )}
         </div>
       </div>
@@ -1160,17 +1702,18 @@ function SessionHome({
 }
 
 function OpeningPanel({ skillUse }: { skillUse: LocalSkillUse }) {
+  const t = ui(useLocale());
   return (
     <section className="opening-panel">
       <div className="opening-card">
         <div className="opening-spinner" />
         <div>
-          <span>正在打开 skill 使用窗口</span>
+          <span>{t.opening.title}</span>
           <h2>{skillUse.title || "Skill use window"}</h2>
           <p>
             {skillUse.skillName} · {skillUse.project} · steps {skillUse.startStep}-{skillUse.endStep}
           </p>
-          <small>只加载这个 skill-use 片段；coverage 判定会在点击“启动分析”后运行。</small>
+          <small>{t.opening.note}</small>
         </div>
       </div>
     </section>
@@ -1192,16 +1735,17 @@ function SessionLibrary({
   onProjectChange: (key: string) => void;
   onSelectCapture: (id: string) => void;
 }) {
+  const t = ui(useLocale());
   const totalCaptures = projectOptions.reduce((sum, option) => sum + option.count, 0);
   return (
     <div className="session-library">
       <div className="session-library-head">
         <div>
-          <strong>Session Library</strong>
-          <span>选择任意项目的 Codex / Claude Code session</span>
+          <strong>{t.sessionLibrary.title}</strong>
+          <span>{t.sessionLibrary.subtitle}</span>
         </div>
         <select value={selectedProjectKey} onChange={(event) => onProjectChange(event.target.value)} aria-label="Captured project">
-          <option value="all">全部项目 ({totalCaptures})</option>
+          <option value="all">{t.sessionLibrary.allProjects} ({totalCaptures})</option>
           {projectOptions.map((option) => (
             <option key={option.key} value={option.key}>
               {option.label} ({option.count})
@@ -1246,6 +1790,8 @@ function CoverageView({
   onSelectEvent: (id: string) => void;
   onStatusChange: (status: CoverageStatus) => void;
 }) {
+  const locale = useLocale();
+  const t = ui(locale);
   const evidenceEvents = (selectedFinding?.evidenceEventIds ?? [])
     .map((id) => project.events.find((event) => event.id === id))
     .filter(Boolean) as TraceEvent[];
@@ -1262,18 +1808,18 @@ function CoverageView({
         />
 
         <div className="evidence-panel">
-          <div className="column-title">判断与证据</div>
+          <div className="column-title">{t.coverage.judgmentEvidence}</div>
           {selectedUnit && selectedFinding ? (
             <>
               <div className={`finding-banner ${selectedFinding.status}`}>
                 <StatusIcon status={selectedFinding.status} />
                 <div>
-                  <strong>{statusMeta[selectedFinding.status].label}</strong>
+                  <strong>{statusLabel(selectedFinding.status, locale)}</strong>
                   <p>{selectedFinding.rationale}</p>
                 </div>
               </div>
               <div className="detail-block">
-                <h3>Skill 约束</h3>
+                <h3>{t.coverage.skillConstraint}</h3>
                 <p>{selectedFinding.analyzedConstraint?.text ?? selectedUnit.text}</p>
                 <small>
                   {selectedUnit.headingPath.join(" / ") || "Root"} ·{" "}
@@ -1283,18 +1829,18 @@ function CoverageView({
                 </small>
               </div>
               <div className="detail-block">
-                <h3>证据片段</h3>
+                <h3>{t.coverage.evidenceSpans}</h3>
                 {evidenceEvents.length ? (
                   evidenceEvents.map((event) => (
                     <EventChip key={event.id} event={event} active={relatedEventIds.has(event.id)} onClick={() => onSelectEvent(event.id)} />
                   ))
                 ) : (
-                  <p className="muted">没有直接证据。</p>
+                  <p className="muted">{t.coverage.noDirectEvidence}</p>
                 )}
               </div>
               {showLocalCandidates ? (
                 <div className="detail-block">
-                  <h3>本地候选轨迹</h3>
+                  <h3>{t.coverage.localCandidates}</h3>
                   {candidateEvents.map((candidate) => (
                     <EventChip key={candidate.event.id} event={candidate.event} score={candidate.score} onClick={() => onSelectEvent(candidate.event.id)} />
                   ))}
@@ -1302,23 +1848,23 @@ function CoverageView({
               ) : null}
               {selectedFinding.suggestedRewrite ? (
                 <div className="rewrite-box">
-                  <h3>改写建议</h3>
+                  <h3>{t.coverage.rewrite}</h3>
                   <p>{selectedFinding.suggestedRewrite}</p>
                 </div>
               ) : null}
               <details className="manual-review">
-                <summary>人工修正</summary>
+                <summary>{t.coverage.manualReview}</summary>
                 <select value={selectedFinding.status} onChange={(event) => onStatusChange(event.target.value as CoverageStatus)}>
                   {Object.keys(statusMeta).map((status) => (
                     <option value={status} key={status}>
-                      {statusMeta[status as CoverageStatus].label}
+                      {statusLabel(status as CoverageStatus, locale)}
                     </option>
                   ))}
                 </select>
               </details>
             </>
           ) : (
-            <p className="muted">选择一条高亮约束。</p>
+            <p className="muted">{t.coverage.selectConstraint}</p>
           )}
         </div>
       </div>
@@ -1337,12 +1883,13 @@ function FindingQueue({
   selectedUnitId?: string;
   onSelectUnit: (id: string) => void;
 }) {
+  const t = ui(useLocale());
   if (!findings.length) {
     return null;
   }
   return (
     <div className="finding-queue">
-      <span>优先看</span>
+      <span>{t.coverage.priority}</span>
       <div>
         {findings.map((finding) => {
           const unit = project.units.find((candidate) => candidate.id === finding.unitId);
@@ -1373,17 +1920,19 @@ function SkillSourcePanel({
   onSelectUnit: (id: string) => void;
   onSelectEvent: (id: string) => void;
 }) {
+  const locale = useLocale();
+  const t = ui(locale);
   const lines = skillSourceDisplayLines(project.skillMarkdown);
   const hasAgentSpans = project.findings.some((finding) => isAgentFinding(finding));
   return (
     <div className="skill-source-panel">
       <div className="column-title split-title">
-        <span>SKILL.md 原文</span>
+        <span>{t.coverage.source}</span>
         <span className="legend-row">
-          <LegendDot status="covered" label="遵循" />
-          <LegendDot status="missed" label="忽略" />
-          <LegendDot status="violated" label="违反" />
-          <LegendDot status="unknown" label="待看" />
+          <LegendDot status="covered" label={t.status.covered} />
+          <LegendDot status="missed" label={t.status.missed} />
+          <LegendDot status="violated" label={t.status.violated} />
+          <LegendDot status="unknown" label={t.coverage.needsReview} />
         </span>
       </div>
       <div className="skill-source-code" aria-label="Highlighted SKILL.md source">
@@ -1426,7 +1975,7 @@ function SkillSourcePanel({
                   onSelectEvent={onSelectEvent}
                 />
               </code>
-              <span className={`line-status-badge ${status}`}>{statusMeta[status].label}</span>
+              <span className={`line-status-badge ${status}`}>{statusLabel(status, locale)}</span>
             </button>
           );
         })}
@@ -1543,16 +2092,18 @@ function EvidenceTooltip({
   candidateEvents: TraceEvent[];
   onSelectEvent: (id: string) => void;
 }) {
+  const locale = useLocale();
+  const t = ui(locale);
   const status = finding?.status ?? "unknown";
   const visibleEvents = events.length ? events : candidateEvents.slice(0, 2);
   return (
     <span className={`evidence-tooltip ${status}`} role="tooltip">
       <span className="tooltip-head">
-        <strong>{statusMeta[status].label}</strong>
+        <strong>{statusLabel(status, locale)}</strong>
         <em>{Math.round((finding?.confidence ?? 0) * 100)}%</em>
       </span>
       <span className="tooltip-unit">{constraint ? `${constraint.kind}: ${constraint.text}` : unit.text}</span>
-      <span className="tooltip-rationale">{finding?.rationale ?? "No coverage finding was generated."}</span>
+      <span className="tooltip-rationale">{finding?.rationale ?? t.coverage.noFinding}</span>
       <span className="tooltip-events">
         {visibleEvents.length ? (
           visibleEvents.map((event) => (
@@ -1569,7 +2120,7 @@ function EvidenceTooltip({
             </span>
           ))
         ) : (
-          <span className="tooltip-empty">No evidence span. Click for details.</span>
+          <span className="tooltip-empty">{t.coverage.noEvidenceTooltip}</span>
         )}
       </span>
     </span>
@@ -1591,6 +2142,8 @@ function SkillGraphView({
   onSelectUnit: (id: string) => void;
   onSelectEvent: (id: string) => void;
 }) {
+  const locale = useLocale();
+  const t = ui(locale);
   const graph = useMemo(() => buildSkillGraph(project), [project]);
   const [selectedGraphNodeId, setSelectedGraphNodeId] = useState("");
   useEffect(() => {
@@ -1606,13 +2159,13 @@ function SkillGraphView({
     <div className="skill-graph-view">
       <div className="skill-graph-main">
         <div className="graph-summary-row">
-          <GraphMetric label="遵循" value={graph.nodes.filter((node) => node.status === "covered").length} tone="good" />
-          <GraphMetric label="违反" value={graph.nodes.filter((node) => node.status === "violated").length} tone="risk" />
-          <GraphMetric label="忽略" value={graph.nodes.filter((node) => node.status === "missed").length} tone="ignore" />
-          <GraphMetric label="未走分支" value={graph.skippedBranches.length} tone="muted" />
+          <GraphMetric label={t.status.covered} value={graph.nodes.filter((node) => node.status === "covered").length} tone="good" />
+          <GraphMetric label={t.status.violated} value={graph.nodes.filter((node) => node.status === "violated").length} tone="risk" />
+          <GraphMetric label={t.status.missed} value={graph.nodes.filter((node) => node.status === "missed").length} tone="ignore" />
+          <GraphMetric label={t.graph.skippedBranches} value={graph.skippedBranches.length} tone="muted" />
         </div>
         <div className="graph-source-row">
-          <span>{graph.source === "agent" ? "Agent skill graph" : "从 coverage findings 自动推断"}</span>
+          <span>{graph.source === "agent" ? "Agent skill graph" : t.graph.sourceDerived}</span>
           <span>{graph.nodes.length} nodes</span>
           <span>{graph.edges.length} edges</span>
         </div>
@@ -1635,15 +2188,15 @@ function SkillGraphView({
                     }}
                   >
                     <span className="graph-edge" />
-                    <span className="graph-node-kind">{node.isCondition ? "条件" : graphKindLabel(node.kind)}</span>
+                    <span className="graph-node-kind">{node.isCondition ? t.graph.condition : graphKindLabel(node.kind, locale)}</span>
                     <span className="graph-node-body">
                       <strong>{truncate(node.text, 150)}</strong>
                       <small>
                         {node.edgeLabel ? `${node.edgeLabel} · ` : null}
-                        lines {node.lineStart}-{node.lineEnd} · {branchStateLabel(node)} · evidence {node.evidenceEventIds.length} · {percent(node.confidence)}
+                        lines {node.lineStart}-{node.lineEnd} · {branchStateLabel(node, locale)} · evidence {node.evidenceEventIds.length} · {percent(node.confidence)}
                       </small>
                     </span>
-                    <span className={`graph-node-status ${node.status}`}>{node.status === "not_applicable" ? "未走" : statusMeta[node.status].label}</span>
+                    <span className={`graph-node-status ${node.status}`}>{statusLabel(node.status, locale)}</span>
                   </button>
                 ))}
               </div>
@@ -1653,7 +2206,7 @@ function SkillGraphView({
       </div>
 
       <aside className="skill-graph-side">
-        <div className="column-title">Trace 路径</div>
+        <div className="column-title">{t.graph.tracePath}</div>
         {selectedNode ? (
           <>
             <div className={`graph-detail-banner ${selectedNode.status}`}>
@@ -1661,15 +2214,15 @@ function SkillGraphView({
               <div>
                 <strong>
                   {selectedNode.isCondition
-                    ? `${statusMeta[selectedNode.status].label} · ${branchStateLabel(selectedNode)}`
-                    : statusMeta[selectedNode.status].label}
+                    ? `${statusLabel(selectedNode.status, locale)} · ${branchStateLabel(selectedNode, locale)}`
+                    : statusLabel(selectedNode.status, locale)}
                 </strong>
                 <p>{selectedNode.finding.rationale}</p>
               </div>
             </div>
 
             <div className="detail-block">
-              <h3>当前节点</h3>
+              <h3>{t.graph.currentNode}</h3>
               <p>{selectedNode.text}</p>
               <small>
                 {selectedNode.heading} · {selectedNode.kind} · lines {selectedNode.lineStart}-{selectedNode.lineEnd}
@@ -1677,22 +2230,22 @@ function SkillGraphView({
             </div>
 
             <div className="detail-block">
-              <h3>证据事件</h3>
+              <h3>{t.graph.evidenceEvents}</h3>
               {evidenceEvents.length ? (
                 evidenceEvents.slice(0, 5).map((event) => (
                   <EventChip key={event.id} event={event} active onClick={() => onSelectEvent(event.id)} />
                 ))
               ) : (
-                <p className="muted">这个节点没有直接证据事件。</p>
+                <p className="muted">{t.graph.noEvidence}</p>
               )}
             </div>
           </>
         ) : (
-          <p className="muted graph-empty">还没有可绘制的 skill graph。</p>
+          <p className="muted graph-empty">{t.graph.empty}</p>
         )}
 
         <div className="graph-branch-list">
-          <h3>走过的条件</h3>
+          <h3>{t.graph.takenConditions}</h3>
           {graph.takenBranches.length ? (
             graph.takenBranches.slice(0, 8).map((node) => (
               <button
@@ -1707,10 +2260,10 @@ function SkillGraphView({
               </button>
             ))
           ) : (
-            <p className="muted">没有识别到已走条件。</p>
+            <p className="muted">{t.graph.noTakenConditions}</p>
           )}
 
-          <h3>未走分支</h3>
+          <h3>{t.graph.skippedBranches}</h3>
           {graph.skippedBranches.length ? (
             graph.skippedBranches.slice(0, 12).map((node) => (
               <button
@@ -1725,7 +2278,7 @@ function SkillGraphView({
               </button>
             ))
           ) : (
-            <p className="muted">没有未走分支。</p>
+            <p className="muted">{t.graph.noSkippedBranches}</p>
           )}
         </div>
       </aside>
@@ -1943,31 +2496,22 @@ function isConditionGraphNode(kind: string, text: string, status: CoverageStatus
   return /\b(if|when|only when|unless|trigger|for python|for java|for js|for javascript|for typescript|for each|before concluding|after|provided that)\b/i.test(text);
 }
 
-function branchStateLabel(node: SkillGraphNode): string {
+function branchStateLabel(node: SkillGraphNode, locale: Locale): string {
+  const t = ui(locale);
   if (node.branchState === "not_taken") {
-    return "未走分支";
+    return t.graph.branchNotTaken;
   }
   if (node.branchState === "taken") {
-    return "已走条件";
+    return t.graph.branchTaken;
   }
   if (node.branchState === "unknown") {
-    return "路径未知";
+    return t.graph.branchUnknown;
   }
-  return "已检查";
+  return t.graph.branchChecked;
 }
 
-function graphKindLabel(kind: string): string {
-  const labels: Record<string, string> = {
-    action: "动作",
-    prohibition: "禁止",
-    order: "顺序",
-    numeric: "数值",
-    command: "命令",
-    file_reference: "文件",
-    evidence: "证据",
-    condition: "条件"
-  };
-  return labels[kind] ?? "约束";
+function graphKindLabel(kind: string, locale: Locale): string {
+  return ui(locale).graph.kind[kind] ?? ui(locale).graph.kind.other;
 }
 
 function skillGraphForProject(project: SkillLensProject): SkillGraphArtifact | null {
@@ -2075,6 +2619,7 @@ function TimelineView({
   onSelectEvent: (id: string) => void;
   onSelectUnit: (id: string) => void;
 }) {
+  const t = ui(useLocale());
   const [visibleLimit, setVisibleLimit] = useState(TIMELINE_PAGE_SIZE);
   const eventUnitIndex = useMemo(() => buildEventUnitIndex(project.findings), [project.findings]);
   const visibleEvents = events.slice(0, visibleLimit);
@@ -2091,7 +2636,7 @@ function TimelineView({
         <div className="toolbar">
           {(["all", "skill", "violations", "tools", "final"] as TimelineFilter[]).map((item) => (
             <button key={item} className={filter === item ? "segmented active" : "segmented"} onClick={() => onFilter(item)}>
-              {timelineFilterLabels[item]}
+              {t.timelineFilters[item]}
             </button>
           ))}
           <span className="timeline-count">
@@ -2128,13 +2673,13 @@ function TimelineView({
           })}
           {visibleLimit < events.length ? (
             <button className="load-more" onClick={() => setVisibleLimit((current) => current + TIMELINE_PAGE_SIZE)}>
-              展开更多事件
+              {t.timeline.loadMore}
             </button>
           ) : null}
         </div>
       </div>
       <aside className="timeline-detail">
-        <div className="column-title">事件详情</div>
+        <div className="column-title">{t.timeline.details}</div>
         {effectiveSelectedEvent ? (
           <>
             <div className="detail-block">
@@ -2144,7 +2689,7 @@ function TimelineView({
             </div>
             <pre>{truncate(JSON.stringify(effectiveSelectedEvent.raw, null, 2), 8000)}</pre>
             <div className="detail-block">
-              <h3>关联 Skill 约束</h3>
+              <h3>{t.timeline.relatedConstraints}</h3>
               {relatedUnitIds.length ? (
                 relatedUnitIds.map((unitId) => {
                   const unit = project.units.find((candidate) => candidate.id === unitId);
@@ -2155,12 +2700,12 @@ function TimelineView({
                   );
                 })
               ) : (
-                <p className="muted">没有关联约束。</p>
+                <p className="muted">{t.timeline.noRelated}</p>
               )}
             </div>
           </>
         ) : (
-          <p className="muted">选择一个轨迹事件。</p>
+          <p className="muted">{t.timeline.selectEvent}</p>
         )}
       </aside>
     </div>
@@ -2246,7 +2791,11 @@ function AnalysisProcessView({
   message,
   steps,
   audit,
-  agentEvents
+  agentEvents,
+  agentProcesses,
+  traceTails,
+  onKillProcess,
+  onTraceTail
 }: {
   analyzing: boolean;
   error: string;
@@ -2254,33 +2803,117 @@ function AnalysisProcessView({
   steps: AnalysisStep[];
   audit: AgentAnalysisAudit | null;
   agentEvents: AgentLiveEvent[];
+  agentProcesses: AgentProcessEvent[];
+  traceTails: Record<string, TraceTailState>;
+  onKillProcess: (processEvent: AgentProcessEvent) => void;
+  onTraceTail: Dispatch<SetStateAction<Record<string, TraceTailState>>>;
 }) {
+  const locale = useLocale();
+  const t = ui(locale);
   const visibleSteps = steps.length
     ? steps
     : [
         {
-          label: "等待启动分析",
+          label: t.analysis.defaultStep,
           status: "pending" as const,
-          detail: "点击右上角“启动分析”后，这里会显示 Codex / Claude judge 的执行过程。"
+          detail: t.analysis.defaultStepDetail
         }
       ];
   const contentEvents = agentEvents.filter(hasDisplayableAgentContent).slice(-80);
+  const conclusions = extractAgentConclusions(agentEvents, audit?.rawAnalysis).slice(0, 12);
+  const activeProcesses = agentProcesses.filter((processEvent) => ["started", "running"].includes(processEvent.status));
+  const progress = summarizeProcessProgress(steps, agentEvents, agentProcesses);
+  const traceTailsRef = useRef(traceTails);
+  const tracePathsKey = useMemo(
+    () => Array.from(new Set(agentProcesses.map((processEvent) => processEvent.tracePath).filter(Boolean))).sort().join("\n"),
+    [agentProcesses]
+  );
+
+  useEffect(() => {
+    traceTailsRef.current = traceTails;
+  }, [traceTails]);
+
+  useEffect(() => {
+    const tracePaths = tracePathsKey.split("\n").filter(Boolean);
+    if (!tracePaths.length) {
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      await Promise.all(
+        tracePaths.map(async (tracePath) => {
+          const current = traceTailsRef.current[tracePath];
+          try {
+            const response = await fetch(
+              `/api/agent-processes/trace?path=${encodeURIComponent(tracePath)}&offset=${current?.nextOffset ?? 0}&maxBytes=32000`
+            );
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const payload = (await response.json()) as Omit<TraceTailState, "updatedAt">;
+            if (cancelled) {
+              return;
+            }
+            onTraceTail((existing) => ({
+              ...existing,
+              [tracePath]: {
+                ...payload,
+                updatedAt: new Date().toISOString(),
+                content: `${existing[tracePath]?.content ?? ""}${payload.content}`.slice(-90000)
+              }
+            }));
+          } catch (traceError) {
+            if (!cancelled) {
+              onTraceTail((existing) => ({
+                ...existing,
+                [tracePath]: {
+                  path: tracePath,
+                  offset: existing[tracePath]?.offset ?? 0,
+                  nextOffset: existing[tracePath]?.nextOffset ?? 0,
+                  size: existing[tracePath]?.size ?? 0,
+                  mtime: existing[tracePath]?.mtime ?? "",
+                  content: existing[tracePath]?.content ?? "",
+                  updatedAt: new Date().toISOString(),
+                  error: traceError instanceof Error ? traceError.message : "Failed to read trace."
+                }
+              }));
+            }
+          }
+        })
+      );
+    };
+    void load();
+    const timer = window.setInterval(load, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [onTraceTail, tracePathsKey]);
   const paths = audit
     ? [
         ["cache key", audit.cacheKey],
         ["analyzer skill", audit.analyzerSkillPath],
-        ["工作目录", audit.workDir],
+        [locale === "zh" ? "工作目录" : "work dir", audit.workDir],
         ["request.json", audit.requestPath],
         ["prompt.txt", audit.promptPath],
         ["selected-skill.md", audit.selectedSkillPath],
         ["constraint-seed.json", audit.constraintSeedPath],
         ["trace-events.json", audit.traceEventsPath],
         ["trace-facts.json", audit.traceFactsPath],
+        ["selected-trace.jsonl", audit.rawTracePath],
         ["progress.md", audit.progressPath],
         ["constraints.json", audit.constraintsPath],
+        ["skill-graph.json", audit.skillGraphPath],
         ["agent-output.txt", audit.rawOutputPath],
         ["response.json", audit.responsePath],
-        ["findings.json", audit.findingsPath]
+        ["findings.json", audit.findingsPath],
+        ["optimizer skill", audit.optimizerSkillPath],
+        ["optimization-prompt.txt", audit.optimizationPromptPath],
+        ["optimized-skill.md", audit.optimizedSkillPath],
+        ["optimization-report.md", audit.optimizationReportPath],
+        ["optimization-diff.md", audit.optimizationDiffPath],
+        ["optimization-packet.json", audit.optimizationPacketPath],
+        ["optimizer-output.txt", audit.optimizerRawOutputPath]
       ].filter((item): item is [string, string] => Boolean(item[1]))
     : [];
 
@@ -2289,11 +2922,11 @@ function AnalysisProcessView({
       <div className="analysis-process-main">
         <div className="process-head">
           <div>
-            <h3>{analyzing ? "正在分析" : error ? "分析失败" : message ? "分析完成" : "分析过程"}</h3>
+            <h3>{analyzing ? t.analysis.running : error ? t.analysis.failed : message ? t.analysis.done : t.analysis.title}</h3>
             <p>
               {audit?.runner
                 ? `${audit.runner} · ${audit.requestId}${audit.cached ? " · cached" : ""}`
-                : "前端选择 skill-use 后，由本地 Codex / Claude Code 完成约束抽取和证据判断。"}
+                : t.analysis.intro}
             </p>
           </div>
           <span className={analyzing ? "process-status running" : error ? "process-status error" : message ? "process-status done" : "process-status"}>
@@ -2303,6 +2936,62 @@ function AnalysisProcessView({
 
         {error ? <p className="error-text process-message">{error}</p> : null}
         {message ? <p className="muted process-message">{message}</p> : null}
+
+        <div className="monitor-grid">
+          <div className="monitor-panel">
+            <div className="stream-head">
+              <strong>{locale === "zh" ? "运行进度" : "Run Progress"}</strong>
+              <span>{progress.percent}%</span>
+            </div>
+            <div className="progress-bar">
+              <span style={{ width: `${progress.percent}%` }} />
+            </div>
+            <p>{progress.label}</p>
+          </div>
+          <div className="monitor-panel">
+            <div className="stream-head">
+              <strong>{locale === "zh" ? "进程" : "Processes"}</strong>
+              <span>{activeProcesses.length} active / {agentProcesses.length} total</span>
+            </div>
+            {agentProcesses.length ? (
+              <div className="process-table">
+                {agentProcesses.map((processEvent) => (
+                  <div className={`process-row ${processEvent.status}`} key={processEvent.id}>
+                    <div>
+                      <strong>{processEvent.command}</strong>
+                      <code>pid {processEvent.pid ?? "?"}{processEvent.pgid ? ` · pgid ${processEvent.pgid}` : ""}</code>
+                      <p>{truncate(processEvent.args.join(" "), 180)}</p>
+                      {processEvent.tracePath ? <small>trace {formatBytes(processEvent.traceSize ?? 0)} · {processEvent.tracePath}</small> : null}
+                    </div>
+                    {["started", "running"].includes(processEvent.status) ? (
+                      <button className="secondary-button danger" onClick={() => onKillProcess(processEvent)}>
+                        {locale === "zh" ? "停止" : "Stop"}
+                      </button>
+                    ) : (
+                      <span>{processEvent.status}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="muted stream-empty">{locale === "zh" ? "尚未观察到子进程。" : "No child process observed yet."}</p>
+            )}
+          </div>
+        </div>
+
+        {conclusions.length ? (
+          <div className="agent-conclusions">
+            <div className="stream-head">
+              <strong>{locale === "zh" ? "运行中结论" : "Working Conclusions"}</strong>
+              <span>{conclusions.length}</span>
+            </div>
+            <div className="conclusion-list">
+              {conclusions.map((item, index) => (
+                <p key={`${item.slice(0, 48)}-${index}`}>{item}</p>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="process-steps">
           {visibleSteps.map((step, index) => (
@@ -2319,7 +3008,7 @@ function AnalysisProcessView({
         {audit?.rawAnalysis ? (
           <div className="agent-final-analysis">
             <div className="stream-head">
-              <strong>Agent 最终分析</strong>
+              <strong>{t.analysis.final}</strong>
               <span>final answer</span>
             </div>
             <pre>{audit.rawAnalysis}</pre>
@@ -2328,13 +3017,13 @@ function AnalysisProcessView({
 
         <div className="agent-json-stream">
           <div className="stream-head">
-            <strong>Agent 实时输出</strong>
+            <strong>{t.analysis.realtime}</strong>
             <span>{contentEvents.length} content events</span>
           </div>
           {contentEvents.length ? (
             <div className="stream-list">
               {contentEvents.map((event, index) => {
-                const item = describeAgentEvent(event);
+                const item = describeAgentEvent(event, locale);
                 const eventJson = formatAgentEventJson(event);
                 return (
                   <div className={`stream-event ${item.tone}`} key={`${event.at}-${index}`}>
@@ -2344,7 +3033,7 @@ function AnalysisProcessView({
                     </div>
                     {item.body ? <p>{item.body}</p> : null}
                     <details className="stream-event-raw">
-                      <summary>原始事件</summary>
+                      <summary>{t.analysis.rawEvent}</summary>
                       <pre className="stream-event-json">{eventJson}</pre>
                     </details>
                   </div>
@@ -2353,16 +3042,34 @@ function AnalysisProcessView({
             </div>
           ) : (
             <p className="muted stream-empty">
-              {audit?.cached
-                ? "这次命中缓存，没有启动 Codex / Claude，所以没有实时 agent 输出。点击“重新分析”可以强制启动 agent。"
-                : "Codex / Claude 输出实际内容后，会在这里显示。"}
+              {audit?.cached ? t.analysis.cachedEmpty : t.analysis.waitingContent}
             </p>
           )}
         </div>
+
+        {Object.values(traceTails).length ? (
+          <div className="agent-json-stream">
+            <div className="stream-head">
+              <strong>{locale === "zh" ? "轨迹文件增长" : "Trace Growth"}</strong>
+              <span>{Object.values(traceTails).length} files</span>
+            </div>
+            <div className="stream-list">
+              {Object.values(traceTails).map((tail) => (
+                <div className="trace-tail" key={tail.path}>
+                  <div className="stream-event-header">
+                    <strong>{formatBytes(tail.size)} · {tail.mtime ? formatShortTime(tail.mtime) : ""}</strong>
+                    <span>{tail.error ?? tail.path}</span>
+                  </div>
+                  <pre>{tail.content ? truncate(tail.content, 12000) : locale === "zh" ? "等待新内容..." : "Waiting for new content..."}</pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <aside className="analysis-process-side">
-        <div className="column-title">本地调试文件</div>
+        <div className="column-title">{t.analysis.debugFiles}</div>
         {paths.length ? (
           <div className="path-list">
             {paths.map(([label, value]) => (
@@ -2373,8 +3080,128 @@ function AnalysisProcessView({
             ))}
           </div>
         ) : (
-          <p className="muted path-empty">分析启动后会显示 request、prompt、原始输出和解析结果的文件路径。</p>
+          <p className="muted path-empty">{t.analysis.debugEmpty}</p>
         )}
+      </aside>
+    </div>
+  );
+}
+
+function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: AgentProcessEvent) => void }) {
+  const locale = useLocale();
+  const [processes, setProcesses] = useState<AgentProcessEvent[]>([]);
+  const [updatedAt, setUpdatedAt] = useState("");
+  const [error, setError] = useState("");
+  const activeProcesses = processes.filter((processEvent) => processEvent.status === "running" || processEvent.status === "started");
+  const groupedProcesses = useMemo(() => groupProcessesByAgent(processes), [processes]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/agent-processes");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = (await response.json()) as { processes?: AgentProcessEvent[]; updatedAt?: string };
+        if (!cancelled) {
+          setProcesses(payload.processes ?? []);
+          setUpdatedAt(payload.updatedAt ?? new Date().toISOString());
+          setError("");
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load processes.");
+        }
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  return (
+    <div className="analysis-process-view monitor-only">
+      <div className="analysis-process-main">
+        <div className="process-head">
+          <div>
+            <h3>{locale === "zh" ? "进程监控" : "Process Monitor"}</h3>
+            <p>
+              {locale === "zh"
+                ? "同一个 SkillScope 服务里观察 Codex / Claude / docker / 批处理进程，并可随时停止。"
+                : "Watch Codex / Claude / docker / batch processes in this SkillScope service and stop them when needed."}
+            </p>
+          </div>
+          <span className="process-status running">{activeProcesses.length} active</span>
+        </div>
+        {error ? <p className="error-text process-message">{error}</p> : null}
+        <div className="monitor-panel process-monitor-panel">
+          <div className="stream-head">
+            <strong>{locale === "zh" ? "本机长程任务" : "Local Long-Running Tasks"}</strong>
+            <span>{updatedAt ? formatShortTime(updatedAt) : ""}</span>
+          </div>
+          {groupedProcesses.length ? (
+            <div className="process-table">
+              {groupedProcesses.map((group) => (
+                <div className="agent-process-group" key={group.id}>
+                  <div className="agent-process-group-head">
+                    <div>
+                      <strong>{group.label}</strong>
+                      <span>{group.processes.length} processes · {group.activeCount} active</span>
+                    </div>
+                    {group.root ? (
+                      <button className="secondary-button danger" onClick={() => onKillProcess(group.root!)}>
+                        {locale === "zh" ? "停止整组" : "Stop Group"}
+                      </button>
+                    ) : null}
+                  </div>
+                  {group.processes.map((processEvent) => (
+                    <div className={`process-row ${processEvent.status}`} key={processEvent.id}>
+                      <div>
+                        <strong>{processEvent.command}</strong>
+                        <code>
+                          pid {processEvent.pid ?? "?"}{processEvent.ppid ? ` · ppid ${processEvent.ppid}` : ""}
+                          {processEvent.pgid ? ` · pgid ${processEvent.pgid}` : ""}
+                        </code>
+                        <p>{truncate(processEvent.args.join(" "), 260)}</p>
+                        <small>
+                          {processEvent.association ?? "unlinked"}
+                          {processEvent.agentRootLabel ? ` · ${processEvent.agentRootLabel}` : ""}
+                        </small>
+                        {processEvent.tracePath ? <small>trace {formatBytes(processEvent.traceSize ?? 0)} · {processEvent.tracePath}</small> : null}
+                      </div>
+                      {["started", "running"].includes(processEvent.status) ? (
+                        <button className="secondary-button danger" onClick={() => onKillProcess(processEvent)}>
+                          {locale === "zh" ? "停止" : "Stop"}
+                        </button>
+                      ) : (
+                        <span>{processEvent.status}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted stream-empty">{locale === "zh" ? "没有发现需要监控的进程。" : "No monitorable process found."}</p>
+          )}
+        </div>
+      </div>
+      <aside className="analysis-process-side">
+        <div className="column-title">{locale === "zh" ? "断点恢复约定" : "Resume Contract"}</div>
+        <div className="path-list">
+          <div className="path-row">
+            <strong>{locale === "zh" ? "当前实现" : "Current support"}</strong>
+            <code>{locale === "zh" ? "kill + trace tail + artifact/cache resume base" : "kill + trace tail + artifact/cache resume base"}</code>
+          </div>
+          <div className="path-row">
+            <strong>{locale === "zh" ? "批处理建议" : "Batch jobs"}</strong>
+            <code>{locale === "zh" ? "写 checkpoint.json: completed, failed, nextIndex, resumeCommand" : "write checkpoint.json: completed, failed, nextIndex, resumeCommand"}</code>
+          </div>
+        </div>
       </aside>
     </div>
   );
@@ -2401,6 +3228,241 @@ function ReportView({ project }: { project: SkillLensProject }) {
       <textarea readOnly value={markdown} rows={28} aria-label="Markdown report" />
     </div>
   );
+}
+
+function RewriteView({ project, audit }: { project: SkillLensProject; audit: AgentAnalysisAudit | null }) {
+  const locale = useLocale();
+  const t = ui(locale);
+  const proposal = useMemo(() => buildRewriteProposal(project, audit, locale), [project, audit, locale]);
+  return (
+    <div className="rewrite-view">
+      <div className="rewrite-head">
+        <div>
+          <h3>{t.rewrite.title}</h3>
+          <p>{t.rewrite.subtitle}</p>
+          {audit?.optimizedSkillPath ? <code>{audit.optimizedSkillPath}</code> : null}
+        </div>
+        <div className="rewrite-actions">
+          <button
+            className="secondary-button"
+            onClick={() => {
+              void navigator.clipboard?.writeText(proposal.markdown);
+            }}
+            disabled={!proposal.hasContent}
+          >
+            <FileText size={16} />
+            {t.rewrite.copy}
+          </button>
+          <button
+            className="secondary-button"
+            onClick={() => downloadFile(`${project.name}.optimized-skill.md`, proposal.markdown, "text/markdown")}
+            disabled={!proposal.hasContent}
+          >
+            <Download size={16} />
+            {t.rewrite.download}
+          </button>
+        </div>
+      </div>
+
+      {proposal.hasContent ? (
+        <div className="rewrite-grid">
+          <div className="rewrite-list">
+            <h4>{t.rewrite.violated}</h4>
+            {proposal.violated.length ? (
+              proposal.violated.map((item) => <RewriteFindingCard key={item.finding.id} item={item} project={project} />)
+            ) : (
+              <p className="muted">{locale === "zh" ? "没有违反项。" : "No violated findings."}</p>
+            )}
+            <h4>{t.rewrite.missed}</h4>
+            {proposal.missed.length ? (
+              proposal.missed.map((item) => <RewriteFindingCard key={item.finding.id} item={item} project={project} />)
+            ) : (
+              <p className="muted">{locale === "zh" ? "没有忽略项。" : "No ignored findings."}</p>
+            )}
+          </div>
+          <div className="rewrite-markdown">
+            <div className="stream-head">
+              <strong>{t.rewrite.proposedPatch}</strong>
+              <span>anti-bloat delta</span>
+            </div>
+            <pre>{proposal.markdown}</pre>
+          </div>
+        </div>
+      ) : (
+        <div className="rewrite-empty">
+          <h3>{t.rewrite.emptyTitle}</h3>
+          <p>{t.rewrite.emptyBody}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface RewriteFindingItem {
+  finding: CoverageFinding;
+  unit?: SkillUnit;
+  text: string;
+  evidenceLabel: string;
+}
+
+function RewriteFindingCard({ item, project }: { item: RewriteFindingItem; project: SkillLensProject }) {
+  const locale = useLocale();
+  const t = ui(locale);
+  const events = eventList(project.events, item.finding.evidenceEventIds);
+  return (
+    <div className={`rewrite-finding-card ${item.finding.status}`}>
+      <div>
+        <StatusDot status={item.finding.status} />
+        <strong>{statusLabel(item.finding.status, locale)}</strong>
+        <span>{item.evidenceLabel}</span>
+      </div>
+      <p>{item.text}</p>
+      <small>{item.finding.rationale}</small>
+      {events.length ? (
+        <div className="rewrite-evidence-row">
+          {events.slice(0, 3).map((event) => (
+            <code key={event.id}>{event.id}</code>
+          ))}
+        </div>
+      ) : (
+        <em>{t.rewrite.noEvidence}</em>
+      )}
+    </div>
+  );
+}
+
+function buildRewriteProposal(
+  project: SkillLensProject,
+  audit: AgentAnalysisAudit | null,
+  locale: Locale
+): { hasContent: boolean; markdown: string; violated: RewriteFindingItem[]; missed: RewriteFindingItem[] } {
+  if (audit?.optimizedSkill?.trim()) {
+    const items = rewriteItems(project.findings, project.units, locale);
+    return {
+      hasContent: true,
+      markdown: audit.optimizedSkill.trim(),
+      violated: items.filter((item) => item.finding.status === "violated"),
+      missed: items.filter((item) => item.finding.status === "missed")
+    };
+  }
+  const risky = project.findings
+    .filter((finding) => finding.status === "violated" || finding.status === "missed")
+    .sort(compareFindingsForDisplay)
+    .slice(0, 12);
+  const items = rewriteItems(risky, project.units, locale);
+  if (!items.length) {
+    return { hasContent: false, markdown: "", violated: [], missed: [] };
+  }
+  const violated = items.filter((item) => item.finding.status === "violated");
+  const missed = items.filter((item) => item.finding.status === "missed");
+  return {
+    hasContent: true,
+    markdown: formatRewriteProposalMarkdown(project, violated, missed, locale),
+    violated,
+    missed
+  };
+}
+
+function rewriteItems(findings: CoverageFinding[], units: SkillUnit[], locale: Locale): RewriteFindingItem[] {
+  return findings.map((finding) => {
+    const unit = units.find((candidate) => candidate.id === finding.unitId);
+    const span = finding.analyzedConstraint?.span;
+    const text = finding.analyzedConstraint?.text ?? unit?.text ?? finding.rationale;
+    const evidenceLabel = span
+      ? `lines ${span.lineStart}-${span.lineEnd}`
+      : unit
+        ? `lines ${unit.lineStart}-${unit.lineEnd}`
+        : locale === "zh"
+          ? "未知行号"
+          : "unknown lines";
+    return { finding, unit, text, evidenceLabel };
+  });
+}
+
+function formatRewriteProposalMarkdown(
+  project: SkillLensProject,
+  violated: RewriteFindingItem[],
+  missed: RewriteFindingItem[],
+  locale: Locale
+): string {
+  const title = locale === "zh" ? "优化 Skill 草案" : "Optimized Skill Proposal";
+  const scope = currentSkillTitle(project);
+  const lines: string[] = [
+    `# ${title}`,
+    "",
+    locale === "zh"
+      ? `对象：${scope}`
+      : `Target: ${scope}`,
+    "",
+    locale === "zh"
+      ? "原则：这是最小 delta proposal，不是整份 skill 重写。不要追加防御性废话；优先替换、合并或移动已有规则。"
+      : "Principle: this is a minimal delta proposal, not a full skill rewrite. Do not append defensive boilerplate; prefer replacing, merging, or moving existing rules.",
+    "",
+    locale === "zh" ? "## 证据摘要" : "## Evidence Summary",
+    ""
+  ];
+  const appendFinding = (item: RewriteFindingItem) => {
+    lines.push(
+      `- ${statusLabel(item.finding.status, locale)} (${item.evidenceLabel}): ${item.text}`,
+      `  - Evidence: ${item.finding.evidenceEventIds.length ? item.finding.evidenceEventIds.join(", ") : "none"}`,
+      `  - Rationale: ${item.finding.rationale}`
+    );
+  };
+  [...violated, ...missed].forEach(appendFinding);
+  lines.push(
+    "",
+    locale === "zh" ? "## 最小补丁建议" : "## Minimal Patch Suggestions",
+    "",
+    locale === "zh"
+      ? "把高频违反/忽略项改成可观测约束。每条新增文本都必须能在未来 trace 中被命令、文件、顺序、输出字段或证据事件证明。"
+      : "Turn repeated violated/ignored points into observable constraints. Every added line must be provable in future traces through commands, files, ordering, output fields, or evidence events.",
+    ""
+  );
+  [...violated, ...missed].slice(0, 6).forEach((item, index) => {
+    const action =
+      item.finding.status === "violated"
+        ? locale === "zh"
+          ? "收紧禁止/输出契约"
+          : "Tighten prohibition/output contract"
+        : locale === "zh"
+          ? "前置为必须检查"
+          : "Move earlier as a required check";
+    lines.push(
+      `### ${index + 1}. ${action}`,
+      "",
+      "```text",
+      proposalSentenceForFinding(item, locale),
+      "```",
+      ""
+    );
+  });
+  lines.push(
+    locale === "zh" ? "## Anti-Bloat 检查" : "## Anti-Bloat Check",
+    "",
+    locale === "zh"
+      ? "- 不加入 `no old logic`、`never repeat previous mistake`、`be careful` 这类不可观测防御句。"
+      : "- Do not add unobservable defensive lines such as `no old logic`, `never repeat previous mistake`, or `be careful`.",
+    locale === "zh"
+      ? "- 如果新增文本不能映射到未来 trace evidence，就不要新增。"
+      : "- If a new line cannot map to future trace evidence, do not add it.",
+    locale === "zh"
+      ? "- 如果两条规则检查同一件事，合并成一条更短的规则。"
+      : "- If two rules check the same behavior, merge them into one shorter rule."
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+function proposalSentenceForFinding(item: RewriteFindingItem, locale: Locale): string {
+  const evidence = item.finding.evidenceEventIds.length ? item.finding.evidenceEventIds.join(", ") : locale === "zh" ? "当前 trace 末尾/检查范围" : "the inspected range";
+  const text = item.text.replace(/\s+/g, " ").trim();
+  if (locale === "zh") {
+    return item.finding.status === "violated"
+      ? `当执行该分支时，必须避免与「${text}」冲突；最终输出需列出用于排除该冲突的证据事件（本次反例：${evidence}）。`
+      : `当该分支适用时，必须先检查「${text}」，并在最终输出中引用对应证据事件；若未发现证据，明确标为 unknown 而不是跳过（本次缺失范围：${evidence}）。`;
+  }
+  return item.finding.status === "violated"
+    ? `When this branch is active, avoid behavior that conflicts with "${text}"; the final output must cite the evidence events used to rule out the conflict (counterexample here: ${evidence}).`
+    : `When this branch applies, check "${text}" before finalizing and cite evidence events in the final output; if evidence is absent, mark it unknown instead of skipping it (missing range here: ${evidence}).`;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -2527,36 +3589,50 @@ function findingDisplayPriority(status: CoverageStatus): number {
   return priority[status];
 }
 
-function stepsFromAudit(audit: AgentAnalysisAudit, finalStatus: "done" | "error", finalDetail?: string): AnalysisStep[] {
+function stepsFromAudit(audit: AgentAnalysisAudit, finalStatus: "done" | "error", finalDetail?: string, locale: Locale = "zh"): AnalysisStep[] {
   const steps = (audit.steps ?? []).map((step) => ({
     label: step.label,
     status: "done" as const,
     detail: `${step.detail ? `${step.detail} · ` : ""}${step.durationMs}ms`
   }));
   if (finalStatus === "error") {
-    return [...steps, { label: "分析失败", status: "error", detail: finalDetail }];
+    return [...steps, { label: ui(locale).analysis.failed, status: "error", detail: finalDetail }];
   }
-  return steps.length ? steps : [{ label: "分析完成", status: "done", detail: "后端返回了分析结果。" }];
+  return steps.length
+    ? steps
+    : [
+        {
+          label: ui(locale).analysis.done,
+          status: "done",
+          detail: locale === "zh" ? "后端返回了分析结果。" : "The backend returned analysis results."
+        }
+      ];
 }
 
-function markLastStepError(steps: AnalysisStep[], detail: string): AnalysisStep[] {
+function markLastStepError(steps: AnalysisStep[], detail: string, locale: Locale = "zh"): AnalysisStep[] {
   if (!steps.length) {
-    return [{ label: "分析失败", status: "error", detail }];
+    return [{ label: ui(locale).analysis.failed, status: "error", detail }];
   }
   const next = steps.map((step) => (step.status === "running" ? { ...step, status: "error" as const, detail } : step));
-  return next.some((step) => step.status === "error") ? next : [...next, { label: "分析失败", status: "error", detail }];
+  return next.some((step) => step.status === "error") ? next : [...next, { label: ui(locale).analysis.failed, status: "error", detail }];
 }
 
 function markStepDone(steps: AnalysisStep[], label: string, detail?: string): AnalysisStep[] {
-  return steps.map((step, index) => {
+  let matchedIndex = -1;
+  const next = steps.map((step, index) => {
     if (step.label === label) {
+      matchedIndex = index;
       return { ...step, status: "done" as const, detail: detail ?? step.detail };
-    }
-    if (index === 1 && label === "发送分析请求" && step.status === "pending") {
-      return { ...step, status: "running" as const };
     }
     return step;
   });
+  if (matchedIndex >= 0) {
+    const following = next.findIndex((step, index) => index > matchedIndex && step.status === "pending");
+    if (following >= 0) {
+      next[following] = { ...next[following], status: "running" };
+    }
+  }
+  return next;
 }
 
 function mergeLiveStep(steps: AnalysisStep[], step: { label: string; detail?: string; durationMs?: number }): AnalysisStep[] {
@@ -2590,6 +3666,98 @@ function parseEventData<T>(event: Event): T | null {
   }
 }
 
+function upsertAgentProcess(processes: AgentProcessEvent[], next: AgentProcessEvent): AgentProcessEvent[] {
+  const index = processes.findIndex((processEvent) => processEvent.id === next.id);
+  if (index < 0) {
+    return [...processes, next];
+  }
+  return processes.map((processEvent, currentIndex) => (currentIndex === index ? { ...processEvent, ...next } : processEvent));
+}
+
+function summarizeProcessProgress(
+  steps: AnalysisStep[],
+  agentEvents: AgentLiveEvent[],
+  processes: AgentProcessEvent[]
+): { percent: number; label: string } {
+  const doneSteps = steps.filter((step) => step.status === "done").length;
+  const totalSteps = Math.max(steps.length, 1);
+  const active = processes.filter((processEvent) => ["started", "running"].includes(processEvent.status));
+  const latestTraceSize = Math.max(0, ...processes.map((processEvent) => processEvent.traceSize ?? 0));
+  const latestEvent = agentEvents
+    .slice()
+    .reverse()
+    .map((event) => describeAgentEvent(event, "zh").body)
+    .find(Boolean);
+  return {
+    percent: Math.min(99, Math.round((doneSteps / totalSteps) * 100)),
+    label:
+      latestEvent ||
+      (active.length
+        ? `active processes: ${active.map((processEvent) => `pid ${processEvent.pid ?? "?"}`).join(", ")}; trace ${formatBytes(latestTraceSize)}`
+        : "waiting for agent activity")
+  };
+}
+
+function extractAgentConclusions(agentEvents: AgentLiveEvent[], rawAnalysis?: string): string[] {
+  const candidates = [
+    ...agentEvents.map((event) => describeAgentEvent(event, "zh").body),
+    rawAnalysis ?? ""
+  ];
+  const lines = candidates
+    .flatMap((text) => text.split(/\r?\n+/))
+    .map((line) => line.replace(/^[-*\d.]+\s*/, "").trim())
+    .filter((line) =>
+      line.length >= 18 &&
+      line.length <= 260 &&
+      /(结论|发现|风险|原因|because|therefore|found|missing|violated|covered|evidence|constraint|progress|completed|failed)/i.test(line)
+    );
+  return uniqueStrings(lines).slice(-12);
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function groupProcessesByAgent(processes: AgentProcessEvent[]): Array<{
+  id: string;
+  label: string;
+  root?: AgentProcessEvent;
+  processes: AgentProcessEvent[];
+  activeCount: number;
+}> {
+  const groups = new Map<string, AgentProcessEvent[]>();
+  for (const processEvent of processes) {
+    const key = processEvent.agentRootPid ? `agent-${processEvent.agentRootPid}` : `unlinked-${processEvent.pgid ?? processEvent.pid ?? processEvent.id}`;
+    const current = groups.get(key) ?? [];
+    current.push(processEvent);
+    groups.set(key, current);
+  }
+  return Array.from(groups.entries()).map(([id, groupProcesses]) => {
+    const root =
+      groupProcesses.find((processEvent) => processEvent.pid && processEvent.pid === processEvent.agentRootPid) ??
+      groupProcesses.find((processEvent) => /codex|claude/i.test(processEvent.command)) ??
+      groupProcesses[0];
+    const label = root?.agentRootLabel ?? (root ? `${root.command} group ${root.pgid ?? root.pid ?? ""}` : id);
+    return {
+      id,
+      label,
+      root,
+      processes: [...groupProcesses].sort((left, right) => (left.pid ?? 0) - (right.pid ?? 0)),
+      activeCount: groupProcesses.filter((processEvent) => processEvent.status === "running" || processEvent.status === "started").length
+    };
+  });
+}
+
 function hasDisplayableAgentContent(event: AgentLiveEvent): boolean {
   if (event.kind === "text") {
     const value = event.payload as { text?: string } | null;
@@ -2612,19 +3780,20 @@ function hasDisplayableAgentContent(event: AgentLiveEvent): boolean {
   return Boolean(extractAgentText(payload).trim());
 }
 
-function describeAgentEvent(event: AgentLiveEvent): { title: string; body: string; tone: "info" | "thinking" | "tool" | "error" | "result" } {
+function describeAgentEvent(event: AgentLiveEvent, locale: Locale): { title: string; body: string; tone: "info" | "thinking" | "tool" | "error" | "result" } {
+  const t = ui(locale);
   if (event.kind === "text") {
     const value = event.payload as { stream?: string; text?: string } | null;
     const text = value?.text ?? stringifyUnknown(event.payload);
     if (/reconnecting|bad gateway|unexpected status 50[234]|cf-ray/i.test(text)) {
       return {
-        title: "上游连接重试中",
+        title: t.analysis.retrying,
         body: truncate(text, 900),
         tone: "thinking"
       };
     }
     return {
-      title: value?.stream === "stderr" ? "运行日志" : "输出",
+      title: value?.stream === "stderr" ? t.analysis.log : t.analysis.output,
       body: truncate(text, 900),
       tone: value?.stream === "stderr" ? "error" : "info"
     };
@@ -2634,34 +3803,34 @@ function describeAgentEvent(event: AgentLiveEvent): { title: string; body: strin
   const type = String(payload.type ?? payload.event ?? payload.name ?? "agent.event");
   const text = extractAgentText(payload);
   const toolName = extractToolName(payload);
-  const completedItem = describeCompletedAgentItem(payload);
+  const completedItem = describeCompletedAgentItem(payload, locale);
 
   if (/cache/i.test(type)) {
-    return { title: "命中分析缓存", body: text || "这次没有重新启动 agent，直接读取已保存的分析结果。", tone: "result" };
+    return { title: t.analysis.cacheHit, body: text || t.analysis.cacheHitBody, tone: "result" };
   }
   if (/thread\.started|session/i.test(type)) {
-    return { title: "创建分析线程", body: text, tone: "info" };
+    return { title: t.analysis.createThread, body: text, tone: "info" };
   }
   if (/turn\.started/i.test(type)) {
-    return { title: "开始一轮判断", body: text || "Agent 开始读取 judge 请求。", tone: "thinking" };
+    return { title: t.analysis.startTurn, body: text || t.analysis.startTurnBody, tone: "thinking" };
   }
   if (completedItem) {
     return completedItem;
   }
   if (/turn\.completed|completed|done/i.test(type)) {
-    return { title: "完成一步", body: text, tone: "result" };
+    return { title: t.analysis.stepDone, body: text, tone: "result" };
   }
   if (/error|failed|failure/i.test(type)) {
     if (/reconnecting|bad gateway|unexpected status 50[234]|cf-ray/i.test(text)) {
-      return { title: "上游连接重试中", body: text || truncate(stringifyUnknown(payload), 900), tone: "thinking" };
+      return { title: t.analysis.retrying, body: text || truncate(stringifyUnknown(payload), 900), tone: "thinking" };
     }
-    return { title: "出错", body: text || truncate(stringifyUnknown(payload), 900), tone: "error" };
+    return { title: t.analysis.error, body: text || truncate(stringifyUnknown(payload), 900), tone: "error" };
   }
   if (toolName || /tool|function|command|exec/i.test(type)) {
-    return { title: toolName ? `调用工具：${toolName}` : "调用工具", body: text, tone: "tool" };
+    return { title: toolName ? `${t.analysis.toolCall}: ${toolName}` : t.analysis.toolCall, body: text, tone: "tool" };
   }
   if (/message|assistant|response|delta|output/i.test(type)) {
-    return { title: "Agent 输出", body: text, tone: "info" };
+    return { title: t.analysis.agentOutput, body: text, tone: "info" };
   }
   return { title: friendlyAgentEventType(type), body: text, tone: text ? "info" : "thinking" };
 }
@@ -2699,8 +3868,10 @@ function stringifyJson(value: unknown): string {
 }
 
 function describeCompletedAgentItem(
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  locale: Locale
 ): { title: string; body: string; tone: "info" | "thinking" | "tool" | "error" | "result" } | null {
+  const t = ui(locale);
   if (payload.type !== "item.completed" || !payload.item || typeof payload.item !== "object") {
     return null;
   }
@@ -2708,17 +3879,18 @@ function describeCompletedAgentItem(
   const itemType = String(item.type ?? "");
   if (itemType === "agent_message") {
     const messageText = typeof item.text === "string" ? item.text : extractAgentText(item);
+    const summary = summarizeJudgeMessage(messageText, locale);
     return {
-      title: summarizeJudgeMessage(messageText) ? "Agent 返回结构化判断" : "Agent 输出分析内容",
-      body: summarizeJudgeMessage(messageText) || truncate(messageText, 900),
+      title: summary ? t.analysis.structured : t.analysis.content,
+      body: summary || truncate(messageText, 900),
       tone: "result"
     };
   }
   if (itemType === "web_search") {
     const query = typeof item.query === "string" ? item.query.trim() : "";
     return {
-      title: "检索事件",
-      body: query ? `query: ${query}` : "Agent 发起了检索事件，但没有查询内容。",
+      title: t.analysis.search,
+      body: query ? `query: ${query}` : locale === "zh" ? "Agent 发起了检索事件，但没有查询内容。" : "Agent started a search event without query content.",
       tone: "tool"
     };
   }
@@ -2726,7 +3898,7 @@ function describeCompletedAgentItem(
   if (tool || /tool|function|command|exec|call/i.test(itemType)) {
     const status = typeof item.status === "string" ? item.status : "";
     return {
-      title: tool ? `工具完成：${tool}` : "工具完成",
+      title: tool ? `${t.analysis.toolDone}: ${tool}` : t.analysis.toolDone,
       body: truncate([status, extractAgentText(item)].filter(Boolean).join("\n\n"), 900),
       tone: "tool"
     };
@@ -2734,7 +3906,8 @@ function describeCompletedAgentItem(
   return null;
 }
 
-function summarizeJudgeMessage(text: string): string {
+function summarizeJudgeMessage(text: string, locale: Locale): string {
+  const t = ui(locale);
   const parsed = parseJsonLike(text);
   if (!parsed || typeof parsed !== "object") {
     return "";
@@ -2747,8 +3920,8 @@ function summarizeJudgeMessage(text: string): string {
   const counts = new Map<CoverageStatus, number>();
   const lines = judgments.slice(0, 6).map((entry, index) => {
     const judgment = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
-    const status = normalizeStatusLabel(judgment.status);
-    const constraint = extractConstraintText(judgment) || "未命名约束";
+    const status = normalizeStatusLabel(judgment.status, locale);
+    const constraint = extractConstraintText(judgment) || t.analysis.unnamedConstraint;
     const confidence = typeof judgment.confidence === "number" ? ` · ${Math.round(judgment.confidence * 100)}%` : "";
     const evidenceCount = Array.isArray(judgment.evidenceEventIds) ? judgment.evidenceEventIds.length : 0;
     if (isCoverageStatus(judgment.status)) {
@@ -2759,11 +3932,11 @@ function summarizeJudgeMessage(text: string): string {
   const countText = validCoverageStatuses
     .map((status) => {
       const count = counts.get(status) ?? 0;
-      return count ? `${statusMeta[status].label} ${count}` : "";
+      return count ? `${statusLabel(status, locale)} ${count}` : "";
     })
     .filter(Boolean)
     .join("，");
-  return [`${judgments.length} 条判断${countText ? `：${countText}` : ""}`, ...lines].join("\n");
+  return [`${judgments.length} ${t.analysis.judgments}${countText ? `: ${countText}` : ""}`, ...lines].join("\n");
 }
 
 function parseJsonLike(text: string): unknown {
@@ -2792,8 +3965,8 @@ function isCoverageStatus(value: unknown): value is CoverageStatus {
   return typeof value === "string" && validCoverageStatuses.includes(value as CoverageStatus);
 }
 
-function normalizeStatusLabel(value: unknown): string {
-  return isCoverageStatus(value) ? statusMeta[value].label : "待判断";
+function normalizeStatusLabel(value: unknown, locale: Locale): string {
+  return isCoverageStatus(value) ? statusLabel(value, locale) : ui(locale).status.unknown;
 }
 
 function extractConstraintText(judgment: Record<string, unknown>): string {

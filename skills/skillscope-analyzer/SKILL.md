@@ -20,11 +20,13 @@ SkillScope provides file paths for the selected skill, normalized skill units, n
 5. Write or update `constraints.json` as soon as the constraint review is complete.
 6. Write or update `skill-graph.json` after extracting constraints and before judging the full trace.
 7. Compile the trace into `trace-facts.json`: event facts, artifact facts, ordering facts, and final-output facts.
-8. Run path-sensitive coverage over the skill graph using the trace facts.
-9. Update graph branch/path state after trace inspection.
-10. Append concise progress notes to `progress.md` after each meaningful stage.
-11. Write `findings.json` when you have coverage judgments worth surfacing.
-12. Finish with a human-readable report citing evidence event IDs.
+8. Read `native-verifier.json` when the launch prompt provides it. Treat it as deterministic evidence for final-output/artifact contracts only.
+9. Run path-sensitive coverage over the skill graph using trace facts plus native verifier facts.
+10. Update graph branch/path state after trace inspection.
+11. Append concise progress notes to `progress.md` after each meaningful stage.
+12. Write `findings.json` when you have coverage judgments worth surfacing.
+13. Do not rewrite or optimize the skill in this analyzer pass; SkillScope launches `skillscope-optimizer` after `findings.json` is saved.
+14. Finish with a human-readable report citing evidence event IDs and native verifier facts where used.
 
 ## Program Analysis Model
 
@@ -36,6 +38,8 @@ Use this compiler-style analysis pipeline:
    - Parse Markdown headings as modules / basic blocks.
    - Parse bullets, numbered items, tables, examples, and output schemas into fine-grained constraints.
    - Classify constraints into `condition`, `obligation`, `prohibition`, `ordering`, `numeric_bound`, `command_contract`, `file_contract`, `evidence_requirement`, and `final_output_contract`.
+   - Also classify each constraint target as `final_output`, `artifact`, `process`, `tool_use`, `reporting`, or `unknown`.
+   - Classify whether each constraint is a hard contract, soft recommendation, or implementation hint. Do not treat illustrative/reference code internals as hard process constraints unless surrounding prose says they are mandatory.
    - Keep precise source spans. If one sentence contains two obligations or an obligation plus a condition, split it.
 
 2. **Skill CFG / control dependence**
@@ -56,12 +60,20 @@ Use this compiler-style analysis pipeline:
    - For prohibitions, look for counterexample facts.
    - For ordering rules, compare event indices, not text similarity.
    - For numeric/output contracts, parse values where possible and compare exact counts/fields.
+   - For final-output or artifact contracts, use native verifier facts as hard evidence when available.
+   - Do not use native verifier pass/fail to prove process-adherence constraints such as exact tool sequence, scoring order, or whether validation happened before writing.
+   - Treat "validate before writing", "run check before final answer", "call verifier before emitting", and other before/after validation-order rules as `target: "process"` or `target: "tool_use"`, not `target: "final_output"`. Native verifier pass can prove the final artifact is valid, but it cannot prove the required validation order occurred.
 
 5. **Evidence slicing**
    - Each finding should cite a minimal slice: branch evidence, satisfying evidence or counterexample evidence, and terminal/final evidence for ignored obligations.
-   - `covered` and `violated` need direct evidence event IDs.
-   - `missed` should cite the inspected range or terminal event when the absence is established.
-   - If reachability or facts are incomplete, use `unknown`.
+- `covered` and `violated` need direct evidence event IDs.
+- `missed` should cite the inspected range or terminal event when the absence is established.
+- If reachability or facts are incomplete, use `unknown`.
+
+6. **Optimization handoff**
+   - Do not edit the skill text here.
+   - Make violated and missed findings precise enough for `skillscope-optimizer` to turn them into a minimal patch.
+   - Include branch state, evidence event IDs, and suggested rewrite hints only when the trace supports them.
 
 This means the analysis is not "read everything and summarize." It is closer to:
 
@@ -81,6 +93,8 @@ The extraction must be coverage-oriented, not summary-oriented. For a long skill
 - Include every mandatory, prohibited, recommended, ordering, validation, evidence, tool/command, file/path, numeric, and final-response constraint that is observable in the trace.
 - Include conditional rules when their trigger can be checked against the task or trace, even if the final status may become `not_applicable` or `unknown`.
 - Keep examples only when they define an exact required pattern, forbidden pattern, numeric bound, command template, output shape, or file category.
+- Treat code blocks labeled or framed as "reference", "example", "fragment", "simplest way", or "helper" as implementation hints by default. Extract their semantic contract, but do not make incidental details mandatory: local variable names, exact helper names, exception message text, arbitrary safety bounds, loop syntax, and tie-breaker order are not hard constraints unless the prose uses MUST/required/final contract language or native verifier evidence maps to that exact detail.
+- If a code block contains both a semantic invariant and incidental implementation details, split them: keep the invariant as `must`, downgrade incidental details to `should`, `may`, or exclude them with a note in `progress.md`.
 - Drop only purely explanatory prose, duplicate restatements, trigger text for using the skill, and text that cannot affect behavior in the selected window.
 - If you merge seed entries, merge only true duplicates and preserve the narrowest useful source span.
 - If you exclude many seed entries, record the exclusion reason and count in `progress.md`.
@@ -104,6 +118,7 @@ For UI highlighting, each constraint in `constraints.json` should include:
 - `kind`: a short category such as `action`, `prohibition`, `order`, `numeric`, `command`, `file_reference`, `evidence`, `condition`, or `other`.
 - `severity`: `must`, `should`, `must_not`, `may`, or `info`.
 - `sourceSpan`: line and character span in the selected skill when available.
+- `target`: `final_output`, `artifact`, `process`, `tool_use`, `reporting`, or `unknown` when you can classify it.
 - `rationale`: why this should be checked.
 
 This file is a working artifact for UI highlighting, not the final answer. Write it early even if later judgments are still unknown.
@@ -158,6 +173,19 @@ Use `branchState` values:
 - `unknown`: the trace was insufficient to know whether the branch applied.
 
 The graph is a working artifact. Update it as trace evidence changes. Do not wait until the final answer if you already know the skill structure.
+
+## Native Verifier Evidence
+
+When `native-verifier.json` is present, read it before final coverage judgment. This file may contain SkillsBench verifier results, CTRF pytest summaries, failed assertion names, and reward/pass metadata.
+
+Use it with strict scope:
+- If the native verifier passes, final-output and artifact constraints covered by that verifier should not be reported as output-level `violated` or `missed` merely because the trace did not show the internal check. Mark them `covered` with `target: "final_output"` or `target: "artifact"` and mention the native verifier evidence.
+- If the native verifier fails, map failed tests to related final-output/artifact constraints when the assertion text is specific enough. This can support `violated` for final-output constraints.
+- Native verifier evidence does not prove that the agent followed the specified process. If a skill explicitly requires "run validation before writing", "iterate keys in this order", or "score candidates with this tuple", judge that as `process` using trace/code evidence.
+- If final artifacts pass but process evidence conflicts with the skill, report the process issue as `target: "process"` and make the rationale clear: final output passed, but process adherence differed.
+- If final artifacts pass and the only conflict is with a reference-code helper detail or heuristic tie-breaker, prefer `covered` for the semantic contract and `unknown` or low-severity `process` only when the skill clearly intended exact helper fidelity. Do not inflate helper fidelity gaps into primary non-compliance.
+- A constraint about the final artifact's fields, schema, feasibility, or score is `final_output`/`artifact`. A constraint about when the agent checked those fields, which script it used, or whether it checked before writing is `process`/`tool_use`.
+- Do not collapse process gaps into final-output failures.
 
 ## Trace Facts
 
@@ -245,10 +273,23 @@ Each useful finding should include:
 - `counterEvidenceEventIds` when relevant
 - `suggestedRewrite` when the skill text caused ambiguity
 - `analyzedConstraint` with `text`, `kind`, `severity`, and `sourceSpan` or `span`
+- `target`: `final_output`, `artifact`, `process`, `tool_use`, `reporting`, or `unknown`
+- `nativeEvidence` when a native verifier result is used as evidence
 
 Write a finding for every extracted constraint in `constraints.json`. If you did not inspect enough evidence for a constraint, write it as `unknown` with a rationale naming the uninspected or unobservable part. Do not silently omit lower-priority constraints after extraction.
 
 Do not invent evidence IDs. If a status depends on absence of behavior, explain which trace range was inspected.
+
+## Optimization Handoff
+
+Do not write `optimized-skill.md` in this analyzer. Make `findings.json`, `skill-graph.json`, and `trace-facts.json` precise enough that `skillscope-optimizer` can later revise the skill without rereading the whole trace blindly.
+
+For violated or missed findings, include:
+- The smallest source span for the failed constraint.
+- Whether the graph branch was taken, not taken, or unknown.
+- Evidence event IDs for explicit conflicts.
+- The inspected event range or absence fact for missed obligations.
+- A short `suggestedRewrite` only when the skill text itself caused the failure.
 
 ## Progress Output
 
@@ -261,7 +302,7 @@ Use `progress.md` for live UI updates. Append short notes after stages such as:
 - trace chunk inspected
 - ordering checked
 - evidence consolidated
-- final report prepared
+- optimization handoff prepared
 
 Keep progress notes factual and compact. Include counts and event ranges when useful.
 
@@ -273,4 +314,4 @@ The final response may be Markdown. It should explain:
 - Keep missed/ignored constraints separate from violated constraints.
 - The strongest evidence event IDs.
 - Important uncertainty.
-- Skill rewrite suggestions backed by trace evidence.
+- Rewrite-relevant findings and uncertainty, but not a full optimized skill.

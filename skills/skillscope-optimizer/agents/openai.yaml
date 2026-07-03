@@ -1,0 +1,4 @@
+interface:
+  display_name: "SkillScope Optimizer"
+  short_description: "Optimize agent skills from SkillScope analysis artifacts"
+  default_prompt: "Optimize this skill from constraints, skill graph, trace facts, and findings."

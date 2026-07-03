@@ -1,8 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
   parseAgentJudgeResponse
 } from "./src/lib/agentJudge";
 import { createProjectFromCaptureBundle } from "./src/lib/project";
+import { buildSkillOptimizerPrompt } from "./src/lib/skillOptimizerPrompt";
 import { detectTraceFormat, parseTraceText } from "./src/lib/traceParser";
 import type {
   CaptureBundle,
@@ -130,7 +131,16 @@ interface AgentAnalysisAudit {
   traceFactsPath?: string;
   progressPath?: string;
   constraintsPath?: string;
+  nativeVerifierPath?: string;
+  rawTracePath?: string;
   skillGraphPath?: string;
+  optimizerSkillPath?: string;
+  optimizationPromptPath?: string;
+  optimizedSkillPath?: string;
+  optimizationReportPath?: string;
+  optimizationDiffPath?: string;
+  optimizationPacketPath?: string;
+  optimizerRawOutputPath?: string;
   rawOutputPath?: string;
   responsePath?: string;
   findingsPath?: string;
@@ -162,6 +172,7 @@ interface AgentAnalysisHooks {
   onSkillGraph?: (event: { skillGraph: SkillGraphArtifact; skillGraphPath?: string }) => void;
   onAgentJson?: (event: unknown) => void;
   onAgentText?: (event: { stream: "stdout" | "stderr"; text: string }) => void;
+  onProcess?: (event: AgentProcessEvent) => void;
 }
 
 interface LightweightTraceEvent {
@@ -170,8 +181,51 @@ interface LightweightTraceEvent {
   text: string;
 }
 
+interface AgentProcessEvent {
+  id: string;
+  requestId?: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  pid?: number;
+  ppid?: number;
+  pgid?: number;
+  agentRootPid?: number;
+  agentRootCommand?: "codex" | "claude" | "unknown";
+  agentRootLabel?: string;
+  association?: "ancestor" | "process_group" | "self" | "unlinked";
+  status: "started" | "running" | "exited" | "failed" | "killed";
+  startedAt: string;
+  endedAt?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  outputPath?: string;
+  promptPath?: string;
+  tracePath?: string;
+  traceSize?: number;
+  traceMtime?: string;
+  error?: string;
+}
+
+interface ActiveAgentProcess {
+  event: AgentProcessEvent;
+  child: ReturnType<typeof spawn>;
+}
+
+interface ProcessSnapshot {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  stat: string;
+  elapsed: string;
+  argsText: string;
+  argv: string[];
+  command: string;
+}
+
 const LOCAL_TRACE_SCAN_LIMIT = Number.parseInt(process.env.SKILLLENS_LOCAL_TRACE_LIMIT ?? "1600", 10);
-const ANALYZER_VERSION = "skillscope-analyzer-v4";
+const ANALYZER_VERSION = "skillscope-analyzer-native-target-reference-hints";
+const activeAgentProcesses = new Map<string, ActiveAgentProcess>();
 
 function skillLensCaptureApi() {
   return {
@@ -181,6 +235,26 @@ function skillLensCaptureApi() {
         const url = req.url ?? "";
         if (url === "/api/captures") {
           await sendJson(res, await readRegistry());
+          return;
+        }
+        if (url.startsWith("/api/agent-processes/trace") && req.method === "GET") {
+          const requestUrl = new URL(url, "http://localhost");
+          try {
+            const tracePath = requestUrl.searchParams.get("path") ?? "";
+            const offset = Number.parseInt(requestUrl.searchParams.get("offset") ?? "0", 10) || 0;
+            const maxBytes = Number.parseInt(requestUrl.searchParams.get("maxBytes") ?? "24000", 10) || 24000;
+            await sendJson(res, await readTraceTail(tracePath, offset, maxBytes));
+          } catch (error) {
+            sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to read trace" });
+          }
+          return;
+        }
+        if (url === "/api/agent-processes" && req.method === "GET") {
+          try {
+            await sendJson(res, await listAgentProcesses());
+          } catch (error) {
+            sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to list processes" });
+          }
           return;
         }
         if (url.startsWith("/api/local-sessions") && req.method === "GET") {
@@ -294,7 +368,8 @@ function skillLensCaptureApi() {
                 onConstraints: (event) => send("constraints", event),
                 onSkillGraph: (event) => send("skill-graph", event),
                 onAgentJson: (event) => send("agent-json", event),
-                onAgentText: (event) => send("agent-text", event)
+                onAgentText: (event) => send("agent-text", event),
+                onProcess: (event) => send("agent-process", event)
               }
             );
             send("result", result);
@@ -306,6 +381,16 @@ function skillLensCaptureApi() {
           } finally {
             send("close", { ok: true, endedAt: new Date().toISOString() });
             res.end();
+          }
+          return;
+        }
+        if (url === "/api/agent-processes/kill" && req.method === "POST") {
+          try {
+            const body = JSON.parse(await readBody(req)) as { id?: string; pid?: number; signal?: NodeJS.Signals };
+            const result = killAgentProcess(body.id, body.pid, body.signal ?? "SIGTERM");
+            await sendJson(res, result);
+          } catch (error) {
+            sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to kill process" });
           }
           return;
         }
@@ -607,31 +692,47 @@ async function runAgentAnalysis(options: {
     const requestPath = path.join(workDir, "request.json");
     const promptPath = path.join(workDir, "prompt.txt");
     const analyzerSkillPath = skillScopeAnalyzerSkillPath();
+    const optimizerSkillPath = skillScopeOptimizerSkillPath();
     const skillSnapshotPath = path.join(workDir, "selected-skill.md");
     const skillUnitsPath = path.join(workDir, "skill-units.json");
     const constraintSeedPath = path.join(workDir, "constraint-seed.json");
     const traceEventsPath = path.join(workDir, "trace-events.json");
     const traceFactsPath = path.join(workDir, "trace-facts.json");
+    const nativeVerifierPath = path.join(workDir, "native-verifier.json");
     const rawTracePath = path.join(workDir, "selected-trace.jsonl");
     const taskPath = path.join(workDir, "task.md");
     const progressPath = path.join(workDir, "progress.md");
     const constraintsPath = path.join(workDir, "constraints.json");
     const skillGraphPath = path.join(workDir, "skill-graph.json");
+    const optimizedSkillPath = path.join(workDir, "optimized-skill.md");
+    const optimizationPromptPath = path.join(workDir, "optimization-prompt.txt");
+    const optimizationReportPath = path.join(workDir, "optimization-report.md");
+    const optimizationDiffPath = path.join(workDir, "optimization-diff.md");
+    const optimizationPacketPath = path.join(workDir, "optimization-packet.json");
+    const optimizerRawOutputPath = path.join(workDir, "optimizer-output.txt");
     const rawOutputPath = path.join(workDir, "agent-output.txt");
     const responsePath = path.join(workDir, "response.json");
     const findingsPath = path.join(workDir, "findings.json");
     Object.assign(audit, {
       workDir,
       analyzerSkillPath,
+      optimizerSkillPath,
       requestPath,
       promptPath,
       selectedSkillPath: skillSnapshotPath,
       constraintSeedPath,
       traceEventsPath,
       traceFactsPath,
+      nativeVerifierPath,
       progressPath,
       constraintsPath,
       skillGraphPath,
+      optimizedSkillPath,
+      optimizationPromptPath,
+      optimizationReportPath,
+      optimizationDiffPath,
+      optimizationPacketPath,
+      optimizerRawOutputPath,
       rawOutputPath,
       responsePath,
       findingsPath
@@ -647,11 +748,13 @@ async function runAgentAnalysis(options: {
       constraintSeedPath,
       traceEventsPath,
       traceFactsPath,
+      nativeVerifierPath,
       rawTracePath,
       taskPath,
       progressPath,
       constraintsPath,
       skillGraphPath,
+      optimizedSkillPath,
       findingsPath
     });
     await writeFile(requestPath, `${JSON.stringify(request, null, 2)}\n`);
@@ -661,8 +764,13 @@ async function runAgentAnalysis(options: {
     await writeFile(constraintSeedPath, `${JSON.stringify({ constraints: constraintSeed }, null, 2)}\n`);
     await writeFile(constraintsPath, `${JSON.stringify({ constraints: constraintSeed }, null, 2)}\n`);
     await writeFile(skillGraphPath, `${JSON.stringify({ schemaVersion: "skilllens.skill-graph.v1", nodes: [], edges: [], paths: [] }, null, 2)}\n`);
+    await writeFile(optimizedSkillPath, "");
+    await writeFile(optimizationReportPath, "");
+    await writeFile(optimizationDiffPath, "");
+    await writeFile(optimizationPacketPath, `${JSON.stringify({ schemaVersion: "skilllens.optimization-packet.v1", edits: [] }, null, 2)}\n`);
     await writeFile(traceEventsPath, `${JSON.stringify(project.events, null, 2)}\n`);
     await writeFile(traceFactsPath, `${JSON.stringify({ schemaVersion: "skilllens.trace-facts.v1", facts: [], indexes: {} }, null, 2)}\n`);
+    await writeFile(nativeVerifierPath, `${JSON.stringify(buildNativeVerifierArtifact(project.result), null, 2)}\n`);
     await writeFile(rawTracePath, project.traceText);
     await writeFile(taskPath, project.taskMarkdown ?? "");
     await writeFile(progressPath, "");
@@ -722,6 +830,65 @@ async function runAgentAnalysis(options: {
         : `${extractedConstraints.length} constraints highlighted; final answer saved`
     );
 
+    let optimizerRawOutput = "";
+    let optimizedSkill = "";
+    if (hasOptimizableFindings(findings)) {
+      startedAt = Date.now();
+      const optimizerPrompt = buildSkillOptimizerPrompt({
+        launcher: "browser",
+        optimizerSkillPath,
+        workDir,
+        requestId,
+        originalSkillPath: skillSnapshotPath,
+        selectedSkillPath: skillSnapshotPath,
+        constraintsPath,
+        skillGraphPath,
+        traceFactsPath,
+        findingsPath,
+        nativeVerifierPath,
+        traceEventsPath,
+        taskPath,
+        optimizedSkillPath,
+        optimizationReportPath,
+        optimizationDiffPath,
+        optimizationPacketPath,
+        failureSummary: summarizeOptimizableFindings(findings)
+      });
+      await writeFile(optimizationPromptPath, optimizerPrompt);
+      hooks.onAgentText?.({
+        stream: "stdout",
+        text: "启动 SkillScope optimizer：读取 constraints/graph/trace-facts/findings 后生成最小 skill 修订。"
+      });
+      try {
+        optimizerRawOutput = await runAgentJudgeCliWithRetry(
+          bundle.agent.product,
+          optimizerPrompt,
+          {
+            workDir,
+            promptPath: optimizationPromptPath,
+            rawOutputPath: optimizerRawOutputPath
+          },
+          hooks
+        );
+        await writeFile(optimizerRawOutputPath, optimizerRawOutput);
+        optimizedSkill = existsSync(optimizedSkillPath) ? await readFile(optimizedSkillPath, "utf8") : "";
+        record(
+          "优化 Skill",
+          startedAt,
+          optimizedSkill.trim()
+            ? `optimizer wrote ${path.basename(optimizedSkillPath)}`
+            : "optimizer completed but did not write an optimized skill"
+        );
+      } catch (error) {
+        const summary = summarizeAgentError(error);
+        await writeFile(optimizerRawOutputPath, summary);
+        hooks.onAgentText?.({ stream: "stderr", text: `Skill optimizer failed after analysis was saved: ${summary}` });
+        record("优化 Skill", startedAt, `failed: ${summary}`);
+      }
+    } else {
+      record("优化 Skill", Date.now(), "skipped: no violated or missed findings");
+    }
+
     const result = {
       requestId,
       runner: audit.runner,
@@ -732,9 +899,18 @@ async function runAgentAnalysis(options: {
       constraintSeedPath,
       traceEventsPath,
       traceFactsPath,
+      nativeVerifierPath,
+      rawTracePath,
       progressPath,
       constraintsPath,
       skillGraphPath,
+      optimizerSkillPath,
+      optimizationPromptPath,
+      optimizedSkillPath,
+      optimizationReportPath,
+      optimizationDiffPath,
+      optimizationPacketPath,
+      optimizerRawOutputPath,
       rawOutputPath,
       responsePath,
       findingsPath,
@@ -744,8 +920,10 @@ async function runAgentAnalysis(options: {
       judgedCount: response.judgments.length,
       structuredJudgments: response.judgments.length,
       rawAnalysis,
+      optimizerRawOutput,
       findings,
       skillGraph,
+      optimizedSkill,
       cached: false,
       cacheKey
     };
@@ -780,11 +958,13 @@ function buildSkillDrivenAnalyzerPrompt(input: {
   constraintSeedPath: string;
   traceEventsPath: string;
   traceFactsPath: string;
+  nativeVerifierPath: string;
   rawTracePath: string;
   taskPath: string;
   progressPath: string;
   constraintsPath: string;
   skillGraphPath: string;
+  optimizedSkillPath: string;
   findingsPath: string;
 }): string {
   return `You were launched by SkillScope after the user clicked "启动分析" in the browser.
@@ -800,6 +980,7 @@ First read the analyzer skill completely. Then read the selected skill and trace
 - Constraint seed extracted from the selected skill: ${input.constraintSeedPath}
 - Normalized trace events: ${input.traceEventsPath}
 - Trace facts artifact to write: ${input.traceFactsPath}
+- Native verifier / result evidence: ${input.nativeVerifierPath}
 - Raw selected trace window: ${input.rawTracePath}
 - Task/context markdown: ${input.taskPath}
 - Request metadata: ${path.join(input.workDir, "request.json")}
@@ -810,15 +991,20 @@ Write working artifacts here:
 - Trace fact table / event IR: ${input.traceFactsPath}
 - Skill graph with conditions, branches, and trace path: ${input.skillGraphPath}
 - Coverage findings when available: ${input.findingsPath}
+- Reserved optimizer output path: ${input.optimizedSkillPath}
 
 Important:
 - The first visible artifact should be constraints.json, after you have extracted precise constraints from the selected skill.
 - The second visible artifact should be skill-graph.json. Build it from the skill structure and extracted constraints before judging all coverage. Update branch/path fields after inspecting trace.
 - Start from constraint-seed.json. Review and refine it instead of re-deriving every line from scratch.
 - Use a program-analysis workflow: compile the skill into a constraint/control-flow graph, compile the trace into trace-facts.json, then judge coverage with reachability, path sensitivity, dataflow evidence, ordering, and counterexample slices.
+- Use native-verifier.json as hard evidence for final-output/artifact contracts when it contains deterministic verifier results. A passing native verifier can cover final-output constraints, but it does not prove process-adherence constraints such as tool order, candidate scoring order, or whether an explicit validation step happened before writing.
+- Classify each extracted constraint with a target when possible: "final_output", "artifact", "process", "tool_use", "reporting", or "unknown". Keep process gaps separate from final-output failures.
+- Validation-order rules such as "validate before writing" or "run checks before final answer" are process/tool-use constraints, not final-output constraints. Native verifier pass proves artifact validity, not validation ordering.
 - Constraint extraction is coverage-oriented, not summary-oriented. For long rule-heavy skills, keep all observable mandatory/prohibited/order/validation/final-output constraints. Do not shrink hundreds of seed entries to a few dozen salient examples unless you record a concrete exclusion rationale in progress.md.
 - findings.json should contain one finding for every extracted constraint. Use status "unknown" for constraints whose evidence was not inspected enough; do not omit them.
 - Distinguish "missed" from "violated": missed means an applicable required action was ignored or absent; violated means the trace contains explicit conflicting behavior. Do not label absence alone as violated.
+- Do not optimize or rewrite the skill in this analyzer pass. Leave optimized-skill.md untouched; SkillScope will launch the optimizer skill after findings.json is saved.
 - Append short progress notes to progress.md as you inspect the trace.
 - Use event IDs from trace-events.json as evidence IDs.
 - Do not use web search or network access; all required evidence is in the local files above.
@@ -861,6 +1047,35 @@ function buildConstraintSeed(project: ReturnType<typeof createProjectFromCapture
       rationale: "Seed constraint from SkillScope's markdown parser; analyzer agent should review and refine this before judging trace evidence."
     }));
   });
+}
+
+function buildNativeVerifierArtifact(result: Record<string, unknown> | undefined) {
+  const reward = numberFromUnknown(result?.reward) ?? numberFromUnknown(result?.score);
+  const success = typeof result?.success === "boolean" ? result.success : typeof reward === "number" ? reward >= 1 : undefined;
+  const nativeVerifier =
+    result?.nativeVerifier && typeof result.nativeVerifier === "object"
+      ? (result.nativeVerifier as Record<string, unknown>)
+      : result?.verifier_result && typeof result.verifier_result === "object"
+        ? (result.verifier_result as Record<string, unknown>)
+        : undefined;
+  return {
+    schemaVersion: "skilllens.native-verifier.v1",
+    source: "capture_result",
+    reward: numberFromUnknown(nativeVerifier?.reward) ?? reward ?? null,
+    passed: typeof nativeVerifier?.passed === "boolean" ? nativeVerifier.passed : success ?? null,
+    tests: numberFromUnknown(nativeVerifier?.tests) ?? null,
+    passedTests: numberFromUnknown(nativeVerifier?.passedTests) ?? null,
+    failedTests: numberFromUnknown(nativeVerifier?.failedTests) ?? null,
+    failedTestNames: Array.isArray(nativeVerifier?.failedTestNames)
+      ? nativeVerifier.failedTestNames.filter((item): item is string => typeof item === "string")
+      : [],
+    note:
+      "Native verifier evidence is deterministic final-output evidence when present. It does not prove process-adherence constraints."
+  };
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function isUsefulConstraintSeed(constraint: { kind: string; text: string; severity: string }): boolean {
@@ -1056,7 +1271,7 @@ function extractTextFromUnknown(value: unknown): string {
 async function runAgentJudgeCli(
   agentProduct: CaptureBundle["agent"]["product"],
   prompt: string,
-  paths: { workDir: string; promptPath: string; rawOutputPath: string },
+  paths: { workDir: string; promptPath: string; rawOutputPath: string; tracePath?: string },
   hooks: AgentAnalysisHooks = {}
 ): Promise<string> {
   if (agentProduct === "claude_code") {
@@ -1065,7 +1280,8 @@ async function runAgentJudgeCli(
       ["-p", "--output-format", "text", "--permission-mode", "dontAsk"],
       prompt,
       process.cwd(),
-      hooks
+      hooks,
+      paths
     );
     return result.stdout.trim() || result.stderr.trim();
   }
@@ -1088,7 +1304,8 @@ async function runAgentJudgeCli(
     ],
     prompt,
     process.cwd(),
-    hooks
+    hooks,
+    paths
   );
   if (existsSync(codexOutputPath)) {
     return readFile(codexOutputPath, "utf8");
@@ -1099,7 +1316,7 @@ async function runAgentJudgeCli(
 async function runAgentJudgeCliWithRetry(
   agentProduct: CaptureBundle["agent"]["product"],
   prompt: string,
-  paths: { workDir: string; promptPath: string; rawOutputPath: string },
+  paths: { workDir: string; promptPath: string; rawOutputPath: string; tracePath?: string },
   hooks: AgentAnalysisHooks = {}
 ): Promise<string> {
   const maxAttempts = 2;
@@ -1161,6 +1378,32 @@ function summarizeAgentError(error: unknown): string {
 
 function isAgentBlockedAnalysis(text: string): boolean {
   return /\b(Blocked by|Failed to write file|bwrap:|Operation not permitted|could not read the required local files)\b/i.test(text);
+}
+
+function hasOptimizableFindings(findings: CoverageFinding[]): boolean {
+  return findings.some((finding) => finding.status === "violated" || finding.status === "missed");
+}
+
+function summarizeOptimizableFindings(findings: CoverageFinding[]): string {
+  const risky = findings
+    .filter((finding) => finding.status === "violated" || finding.status === "missed")
+    .slice(0, 24)
+    .map((finding, index) => {
+      const constraint = finding.analyzedConstraint?.text ?? finding.rationale;
+      const span = finding.analyzedConstraint?.span
+        ? `L${finding.analyzedConstraint.span.lineStart}-L${finding.analyzedConstraint.span.lineEnd}`
+        : "unknown span";
+      const evidence = [...finding.evidenceEventIds, ...finding.counterEvidenceEventIds].slice(0, 8).join(", ") || "no direct evidence IDs";
+      const target = finding.target ?? finding.analyzedConstraint?.target ?? "unknown";
+      const native = finding.nativeEvidence?.length
+        ? `\n   native evidence: ${finding.nativeEvidence
+            .slice(0, 4)
+            .map((item) => `${item.source}:${item.status}${item.testName ? `:${item.testName}` : ""}`)
+            .join(", ")}`
+        : "";
+      return `${index + 1}. ${finding.status} target=${target} ${finding.unitId} ${span}: ${constraint}\n   evidence: ${evidence}${native}\n   rationale: ${finding.rationale}`;
+    });
+  return risky.length ? risky.join("\n") : "No violated or missed findings.";
 }
 
 function analysisCacheKey(input: {
@@ -1255,7 +1498,8 @@ async function readCachedAnalysisForCapture(options: {
       segmentStartStep: effectiveSegmentStartStep,
       segmentEndStep: effectiveSegmentEndStep,
       maxFindings: 0,
-      skillSha256: sha256(project.skillMarkdown)
+      skillSha256: sha256(project.skillMarkdown),
+      analyzerVersion: ANALYZER_VERSION
     }));
   if (!compatibleCached) {
     return null;
@@ -1276,6 +1520,7 @@ async function readLatestCompatibleCachedAnalysis(input: {
   segmentEndStep?: number;
   maxFindings: number;
   skillSha256: string;
+  analyzerVersion: string;
 }): Promise<AgentAnalysisCacheEntry | null> {
   await ensureAnalysisDb();
   const rows = await sqliteJson<{
@@ -1306,6 +1551,7 @@ async function readLatestCompatibleCachedAnalysis(input: {
         AND segment_end_step IS ${sqlNullableNumber(input.segmentEndStep)}
         AND max_findings = ${input.maxFindings}
         AND skill_sha256 = ${sqlText(input.skillSha256)}
+        AND analyzer_version = ${sqlText(input.analyzerVersion)}
       ORDER BY updated_at DESC
       LIMIT 5;`
   );
@@ -1358,14 +1604,25 @@ async function hydrateCachedResultWithExtractedConstraints(
   const findings = Array.isArray(result.findings) ? (result.findings as CoverageFinding[]) : [];
   const constraintsPath = typeof result.constraintsPath === "string" ? result.constraintsPath : "";
   const skillGraphPath = typeof result.skillGraphPath === "string" ? result.skillGraphPath : "";
+  const optimizedSkillPath = typeof result.optimizedSkillPath === "string" ? result.optimizedSkillPath : "";
   const skillGraph =
     result.skillGraph && typeof result.skillGraph === "object"
       ? (result.skillGraph as SkillGraphArtifact)
       : skillGraphPath
         ? await readSkillGraphArtifact(skillGraphPath, project)
         : null;
+  const optimizedSkill =
+    typeof result.optimizedSkill === "string" && result.optimizedSkill.trim()
+      ? result.optimizedSkill
+      : optimizedSkillPath && existsSync(optimizedSkillPath)
+        ? await readFile(optimizedSkillPath, "utf8")
+        : "";
   if (!findings.length || !constraintsPath || !existsSync(constraintsPath)) {
-    return skillGraph ? { ...result, skillGraph } : result;
+    return {
+      ...result,
+      ...(skillGraph ? { skillGraph } : {}),
+      ...(optimizedSkill ? { optimizedSkill } : {})
+    };
   }
   const requestId = typeof result.requestId === "string" ? result.requestId : "cached-agent-analysis";
   const constraints = await readExtractedConstraintsArtifact(constraintsPath, project);
@@ -1377,6 +1634,7 @@ async function hydrateCachedResultWithExtractedConstraints(
   return {
     ...result,
     ...(skillGraph ? { skillGraph } : {}),
+    ...(optimizedSkill ? { optimizedSkill } : {}),
     findings: mergedFindings,
     judgedCount: mergedFindings.length,
     structuredJudgments: typeof result.structuredJudgments === "number" ? result.structuredJudgments : findings.length
@@ -1617,6 +1875,10 @@ function skillScopeAnalyzerSkillPath(): string {
   return path.join(process.cwd(), "skills", "skillscope-analyzer", "SKILL.md");
 }
 
+function skillScopeOptimizerSkillPath(): string {
+  return path.join(process.cwd(), "skills", "skillscope-optimizer", "SKILL.md");
+}
+
 async function writeLocalSessionIndexDb(index: LocalSessionIndexDb) {
   const dbPath = localSessionIndexDbPath();
   await mkdir(path.dirname(dbPath), { recursive: true });
@@ -1648,7 +1910,7 @@ async function captureLocalSession(
       ...resolvedSkillPaths
     ].join("\n")
   )}`;
-  const outPath = path.join(process.cwd(), ".skilllens", "captures", captureId, "skilllens.capture.json");
+  const outPath = path.join(process.cwd(), ".skilllens", "captures", captureId, "skillscope.capture.json");
   if (existsSync(outPath)) {
     const bundle = JSON.parse(await readFile(outPath, "utf8")) as CaptureBundle;
     await updateCaptureRegistry(process.cwd(), outPath, captureId, bundle);
@@ -2470,14 +2732,50 @@ function runCommandWithInputStream(
   args: string[],
   input: string,
   cwd: string,
-  hooks: AgentAnalysisHooks
+  hooks: AgentAnalysisHooks,
+  paths?: { workDir?: string; promptPath?: string; rawOutputPath?: string; tracePath?: string }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       stdio: "pipe",
-      shell: process.platform === "win32"
+      shell: process.platform === "win32",
+      detached: process.platform !== "win32"
     });
+    const processId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const startedAt = new Date().toISOString();
+    const processEvent: AgentProcessEvent = {
+      id: processId,
+      requestId: paths?.workDir ? path.basename(paths.workDir) : undefined,
+      command,
+      args,
+      cwd,
+      pid: child.pid,
+      ppid: process.pid,
+      pgid: process.platform !== "win32" ? child.pid : undefined,
+      agentRootPid: child.pid,
+      agentRootCommand: command === "claude" ? "claude" : command === "codex" ? "codex" : "unknown",
+      agentRootLabel: command === "claude" || command === "codex" ? `${command} pid ${child.pid ?? "?"}` : undefined,
+      association: command === "claude" || command === "codex" ? "self" : "unlinked",
+      status: "started",
+      startedAt,
+      outputPath: paths?.rawOutputPath,
+      promptPath: paths?.promptPath,
+      tracePath: paths?.tracePath,
+      ...traceStatFields(paths?.tracePath)
+    };
+    activeAgentProcesses.set(processId, { event: processEvent, child });
+    hooks.onProcess?.(processEvent);
+    hooks.onAgentText?.({
+      stream: "stdout",
+      text: `Started process pid=${child.pid ?? "unknown"}${processEvent.pgid ? ` pgid=${processEvent.pgid}` : ""}: ${command} ${args.join(" ")}`
+    });
+    const tracePoller =
+      command === "codex" || command === "claude"
+        ? setInterval(() => {
+            void refreshAgentProcessTrace(processId, command, cwd, Date.parse(startedAt), hooks);
+          }, 2200)
+        : null;
     let stdout = "";
     let stderr = "";
     let stdoutBuffer = "";
@@ -2517,8 +2815,22 @@ function runCommandWithInputStream(
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      if (tracePoller) {
+        clearInterval(tracePoller);
+      }
       flushStdoutLine(stdoutBuffer);
       flushStderrLine(stderrBuffer);
+      const current = activeAgentProcesses.get(processId)?.event ?? processEvent;
+      const finalEvent: AgentProcessEvent = {
+        ...current,
+        status: current.status === "killed" ? "killed" : code === 0 ? "exited" : "failed",
+        endedAt: new Date().toISOString(),
+        exitCode: code,
+        signal: null,
+        ...traceStatFields(current.tracePath)
+      };
+      activeAgentProcesses.delete(processId);
+      hooks.onProcess?.(finalEvent);
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
@@ -2527,6 +2839,274 @@ function runCommandWithInputStream(
     });
     child.stdin.end(input);
   });
+}
+
+async function refreshAgentProcessTrace(
+  processId: string,
+  command: string,
+  cwd: string,
+  startedAfterMs: number,
+  hooks: AgentAnalysisHooks
+) {
+  const active = activeAgentProcesses.get(processId);
+  if (!active) {
+    return;
+  }
+  const tracePath = active.event.tracePath ?? (await findRecentAgentTrace(command, cwd, startedAfterMs));
+  if (!tracePath) {
+    return;
+  }
+  const nextEvent: AgentProcessEvent = {
+    ...active.event,
+    status: active.event.status === "started" ? "running" : active.event.status,
+    tracePath,
+    ...traceStatFields(tracePath)
+  };
+  const changed =
+    nextEvent.tracePath !== active.event.tracePath ||
+    nextEvent.traceSize !== active.event.traceSize ||
+    nextEvent.traceMtime !== active.event.traceMtime ||
+    nextEvent.status !== active.event.status;
+  if (!changed) {
+    return;
+  }
+  active.event = nextEvent;
+  activeAgentProcesses.set(processId, active);
+  hooks.onProcess?.(nextEvent);
+}
+
+async function findRecentAgentTrace(command: string, cwd: string, startedAfterMs: number): Promise<string | undefined> {
+  const root =
+    command === "claude"
+      ? path.join(process.env.CLAUDE_HOME || path.join(homeDir(), ".claude"), "projects")
+      : path.join(process.env.CODEX_HOME || path.join(homeDir(), ".codex"), "sessions");
+  if (!existsSync(root)) {
+    return undefined;
+  }
+  const files = (await listJsonlFiles(root))
+    .filter((file) => file.mtimeMs >= startedAfterMs - 5000)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, 16);
+  for (const file of files) {
+    try {
+      const head = await readTraceTail(file.path, 0, 12000);
+      if (!cwd || head.content.includes(cwd) || command === "claude") {
+        return file.path;
+      }
+    } catch {
+      // Ignore disappearing traces while the agent process is starting.
+    }
+  }
+  return files[0]?.path;
+}
+
+function killAgentProcess(id: string | undefined, pid: number | undefined, signal: NodeJS.Signals) {
+  const active = id ? activeAgentProcesses.get(id) : Array.from(activeAgentProcesses.values()).find((item) => item.event.pid === pid);
+  if (!active && !pid) {
+    throw new Error("process is not active");
+  }
+  const targetPid = active?.event.pgid ?? active?.event.pid ?? pid;
+  if (!targetPid) {
+    throw new Error("process has no pid");
+  }
+  const killTarget = process.platform !== "win32" && active?.event.pgid ? -targetPid : targetPid;
+  process.kill(killTarget, signal);
+  if (!active) {
+    return {
+      id: String(pid),
+      command: "external",
+      args: [],
+      cwd: "",
+      pid,
+      status: "killed",
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+      signal
+    } satisfies AgentProcessEvent;
+  }
+  active.event = {
+    ...active.event,
+    status: "killed",
+    endedAt: new Date().toISOString(),
+    signal,
+    ...traceStatFields(active.event.tracePath)
+  };
+  activeAgentProcesses.set(active.event.id, active);
+  return active.event;
+}
+
+async function listAgentProcesses(): Promise<{ processes: AgentProcessEvent[]; updatedAt: string }> {
+  const active = Array.from(activeAgentProcesses.values()).map((item) => ({
+    ...item.event,
+    ...traceStatFields(item.event.tracePath)
+  }));
+  if (process.platform === "win32") {
+    return { processes: active, updatedAt: new Date().toISOString() };
+  }
+  const rows = await execFileText("ps", ["-eo", "pid=,ppid=,pgid=,stat=,etime=,args="]);
+  const snapshots = rows
+    .split(/\r?\n/)
+    .map(parseProcessSnapshot)
+    .filter((snapshot): snapshot is ProcessSnapshot => Boolean(snapshot));
+  const byPid = new Map(snapshots.map((snapshot) => [snapshot.pid, snapshot]));
+  const external = snapshots
+    .filter(isMonitorableProcess)
+    .map((snapshot) => snapshotToAgentProcess(snapshot, byPid))
+    .filter((processEvent) => !active.some((item) => item.pid === processEvent.pid));
+  return {
+    processes: [...active, ...external].sort((left, right) => (left.startedAt < right.startedAt ? 1 : -1)),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function parseProcessSnapshot(row: string): ProcessSnapshot | null {
+  const match = row.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+  if (!match) {
+    return null;
+  }
+  const [, pidText, ppidText, pgidText, statText, elapsed, argsText] = match;
+  const argv = splitCommandLine(argsText);
+  const command = path.basename(argv[0] ?? argsText.split(/\s+/)[0] ?? "process");
+  return {
+    pid: Number(pidText),
+    ppid: Number(ppidText),
+    pgid: Number(pgidText),
+    stat: statText,
+    elapsed,
+    argsText,
+    argv,
+    command
+  };
+}
+
+function isMonitorableProcess(snapshot: ProcessSnapshot): boolean {
+  if (!/\b(codex|claude|bench|docker|pytest|vitest|npm|pnpm|yarn|python|node|uv)\b/i.test(snapshot.argsText)) {
+    return false;
+  }
+  if (/SkillScope\/node_modules\/\.bin\/vite|rg agent-processes|ps -eo|cpuUsage\.sh/i.test(snapshot.argsText)) {
+    return false;
+  }
+  return true;
+}
+
+function snapshotToAgentProcess(snapshot: ProcessSnapshot, byPid: Map<number, ProcessSnapshot>): AgentProcessEvent {
+  const root = findAgentRoot(snapshot, byPid);
+  return {
+    id: `external-${snapshot.pid}`,
+    command: snapshot.command,
+    args: snapshot.argv.slice(1),
+    cwd: "",
+    pid: snapshot.pid,
+    ppid: snapshot.ppid,
+    pgid: snapshot.pgid,
+    agentRootPid: root?.snapshot.pid,
+    agentRootCommand: root?.kind ?? "unknown",
+    agentRootLabel: root ? `${root.kind} pid ${root.snapshot.pid}` : undefined,
+    association: root ? root.association : "unlinked",
+    status: snapshot.stat.includes("Z") ? "failed" : "running",
+    startedAt: elapsedToStartedAt(snapshot.elapsed),
+    outputPath: undefined,
+    promptPath: undefined
+  };
+}
+
+function findAgentRoot(
+  snapshot: ProcessSnapshot,
+  byPid: Map<number, ProcessSnapshot>
+): { snapshot: ProcessSnapshot; kind: "codex" | "claude"; association: "ancestor" | "process_group" | "self" } | null {
+  if (isAgentRoot(snapshot)) {
+    return { snapshot, kind: agentKind(snapshot), association: "self" };
+  }
+  const seen = new Set<number>();
+  let current: ProcessSnapshot | undefined = snapshot;
+  while (current && current.ppid && !seen.has(current.ppid)) {
+    seen.add(current.pid);
+    const parent = byPid.get(current.ppid);
+    if (!parent) {
+      break;
+    }
+    if (isAgentRoot(parent)) {
+      return { snapshot: parent, kind: agentKind(parent), association: "ancestor" };
+    }
+    current = parent;
+  }
+  const groupRoot = Array.from(byPid.values()).find(
+    (candidate) => candidate.pgid === snapshot.pgid && candidate.pid !== snapshot.pid && isAgentRoot(candidate)
+  );
+  return groupRoot ? { snapshot: groupRoot, kind: agentKind(groupRoot), association: "process_group" } : null;
+}
+
+function isAgentRoot(snapshot: ProcessSnapshot): boolean {
+  return /\b(codex|claude)\b/i.test(snapshot.argsText) && !/skillscope.*analyzer/i.test(snapshot.argsText);
+}
+
+function agentKind(snapshot: ProcessSnapshot): "codex" | "claude" {
+  return /\bclaude\b/i.test(snapshot.argsText) ? "claude" : "codex";
+}
+
+function splitCommandLine(value: string): string[] {
+  return value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((item) => item.replace(/^["']|["']$/g, "")) ?? [];
+}
+
+function elapsedToStartedAt(elapsed: string): string {
+  const parts = elapsed.split("-");
+  const days = parts.length > 1 ? Number(parts[0]) || 0 : 0;
+  const time = parts[parts.length - 1] ?? "0";
+  const nums = time.split(":").map((item: string) => Number(item) || 0);
+  const [hours, minutes, seconds] = nums.length === 3 ? nums : [0, nums[0] ?? 0, nums[1] ?? 0];
+  return new Date(Date.now() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000).toISOString();
+}
+
+function execFileText(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr || error.message));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function readTraceTail(tracePath: string, offset: number, maxBytes: number) {
+  if (!tracePath) {
+    throw new Error("path is required");
+  }
+  const resolved = path.resolve(tracePath);
+  const info = await stat(resolved);
+  const start = Math.max(0, Math.min(offset, info.size));
+  const end = Math.min(info.size, start + Math.max(1024, Math.min(maxBytes, 250000)));
+  const content =
+    end > start
+      ? await new Promise<string>((resolve, reject) => {
+          const chunks: Buffer[] = [];
+          const stream = createReadStream(resolved, { start, end: end - 1 });
+          stream.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
+          stream.on("error", reject);
+          stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        })
+      : "";
+  return {
+    path: resolved,
+    offset: start,
+    nextOffset: end,
+    size: info.size,
+    mtime: info.mtime.toISOString(),
+    content
+  };
+}
+
+function traceStatFields(tracePath: string | undefined): Pick<AgentProcessEvent, "traceSize" | "traceMtime"> {
+  if (!tracePath || !existsSync(tracePath)) {
+    return {};
+  }
+  try {
+    const info = statSync(tracePath);
+    return { traceSize: info.size, traceMtime: info.mtime.toISOString() };
+  } catch {
+    return {};
+  }
 }
 
 function sanitizeAgentStreamEvent(value: unknown): unknown {

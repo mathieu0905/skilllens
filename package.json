@@ -20,7 +20,8 @@
     "open": "tsx scripts/open.ts",
     "analyze": "tsx scripts/analyze.ts",
     "codex": "tsx scripts/codex.ts",
-    "install:codex-prompt": "tsx scripts/install-codex-prompt.ts"
+    "install:codex-prompt": "tsx scripts/install-codex-prompt.ts",
+    "skillsbench": "tsx scripts/skillsbench.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

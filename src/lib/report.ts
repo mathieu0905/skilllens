@@ -15,7 +15,7 @@ export function generateMarkdownReport(project: SkillLensProject): string {
   const lowObservable = project.units.filter((unit) => !unit.observable).slice(0, 3);
 
   const lines = [
-    `# SkillLens Report: ${project.name}`,
+    `# SkillScope Report: ${project.name}`,
     "",
     `Source: ${project.sourceType}`,
     `Result: ${formatResult(project.result.success)}${typeof project.result.score === "number" ? `, score ${project.result.score}` : ""}`,
@@ -108,7 +108,7 @@ export function exportHtmlReport(project: SkillLensProject): string {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>SkillLens Report - ${escapeHtml(project.name)}</title>
+  <title>SkillScope Report - ${escapeHtml(project.name)}</title>
   <style>
     body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #17202a; }
     h1 { margin-bottom: 4px; }
@@ -127,7 +127,7 @@ export function exportHtmlReport(project: SkillLensProject): string {
   </style>
 </head>
 <body>
-  <h1>SkillLens Report</h1>
+  <h1>SkillScope Report</h1>
   <p>${escapeHtml(project.name)} · Like code coverage, but for agent skills.</p>
   <section class="summary">
     <div class="metric"><span>Followed</span><strong>${summary.counts.covered}</strong></div>

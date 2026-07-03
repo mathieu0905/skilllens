@@ -86,6 +86,14 @@ function analyzeConstraint(
     id: `coverage.finding.${String(index + 1).padStart(3, "0")}.constraint.${String(constraintIndex + 1).padStart(2, "0")}`,
     unitId: unit.id,
     constraintId: constraint.id,
+    target: inferCoverageTarget(constraint.text, constraint.kind),
+    analyzedConstraint: {
+      kind: constraint.kind,
+      text: constraint.text,
+      severity: constraint.severity,
+      span: constraint.span,
+      target: inferCoverageTarget(constraint.text, constraint.kind)
+    },
     rationale: `${constraint.kind} constraint: ${finding.rationale}`
   };
 }
@@ -169,6 +177,7 @@ function analyzeUnit(
   return {
     id: `coverage.finding.${String(index + 1).padStart(3, "0")}`,
     unitId: unit.id,
+    target: inferCoverageTarget(unit.text),
     status,
     confidence,
     rationale,
@@ -196,6 +205,7 @@ function notApplicableFinding(
         : `coverage.finding.${String(index + 1).padStart(3, "0")}`,
     unitId: unit.id,
     constraintId,
+    target: inferCoverageTarget(unit.text),
     status: "not_applicable",
     confidence: 0.74,
     rationale,
@@ -206,6 +216,26 @@ function notApplicableFinding(
     analysisMethod: recipe.method,
     analysisRecipe: recipe.name
   };
+}
+
+function inferCoverageTarget(text: string, kind = ""): CoverageFinding["target"] {
+  const haystack = `${kind} ${text}`.toLowerCase();
+  if (/\b(final output|output contract|solution\.json|schedule\.csv|reward\.json|output\.json|final artifact|csv|json field|must be empty|should be empty|no .*violations?|valid schema|format constraint)\b/.test(haystack)) {
+    return "final_output";
+  }
+  if (/\b(file|path|write|read|artifact|created|updated|edited)\b/.test(haystack)) {
+    return "artifact";
+  }
+  if (/\b(command|tool|call|run|execute|pytest|npm|codex|claude|browser|screenshot)\b/.test(haystack)) {
+    return "tool_use";
+  }
+  if (/\b(final response|report|explain|tell the user|summary|markdown review)\b/.test(haystack)) {
+    return "reporting";
+  }
+  if (/\b(before|after|order|process|iterate|first|then|immediately|score|sort|select|branch|workflow|driver|validation before)\b/.test(haystack)) {
+    return "process";
+  }
+  return "unknown";
 }
 
 function isActivationHint(text: string): boolean {

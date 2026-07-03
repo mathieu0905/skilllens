@@ -2,6 +2,8 @@ import type {
   AnalysisMethod,
   CoverageFinding,
   CoverageStatus,
+  CoverageTarget,
+  NativeVerifierEvidence,
   SkillGraphArtifact,
   SkillGraphArtifactEdge,
   SkillGraphArtifactNode,
@@ -55,6 +57,7 @@ export interface AgentAnalyzedConstraint {
   text: string;
   severity: string;
   sourceSpan: SourceSpan;
+  target?: CoverageTarget;
 }
 
 export interface AgentJudgeResponse {
@@ -66,6 +69,7 @@ export interface AgentJudgeResponse {
 export interface AgentJudgment {
   findingId: string;
   unitId: string;
+  constraintId?: string;
   analyzedConstraint: AgentAnalyzedConstraint;
   status: CoverageStatus;
   confidence: number;
@@ -73,6 +77,8 @@ export interface AgentJudgment {
   evidenceEventIds: string[];
   counterEvidenceEventIds?: string[];
   suggestedRewrite?: string | null;
+  target?: CoverageTarget;
+  nativeEvidence?: NativeVerifierEvidence[];
 }
 
 export interface AgentExtractedConstraint {
@@ -82,6 +88,7 @@ export interface AgentExtractedConstraint {
   text: string;
   severity?: string;
   sourceSpan?: SourceSpan;
+  target?: CoverageTarget;
   rationale?: string;
 }
 
@@ -156,15 +163,18 @@ export function constraintsToPendingFindings(
           charStart: 0,
           charEnd: unit.text.length,
           text: constraint.text
-        }
+        },
+        target: constraint.target
       },
       unit
     );
+    const target = analyzedConstraint.target ?? inferCoverageTarget(analyzedConstraint.text, analyzedConstraint.kind);
     return [
       {
         id: constraint.id || `coverage.agent.constraint.${String(index + 1).padStart(3, "0")}`,
         unitId: unit.id,
         analyzedConstraint,
+        target,
         status: "unknown" as CoverageStatus,
         confidence: 0,
         rationale: constraint.rationale
@@ -251,17 +261,25 @@ export function applyAgentJudgeResponse(
       return;
     }
     seen.add(judgment.findingId);
+    const analyzedConstraint = normalizeAnalyzedConstraint(judgment.analyzedConstraint, unit);
+    const target = normalizeCoverageTarget(judgment.target) ?? analyzedConstraint.target ?? inferCoverageTarget(analyzedConstraint.text, analyzedConstraint.kind);
     const status = validStatuses.includes(judgment.status) ? judgment.status : "unknown";
     const evidenceEventIds = unique(judgment.evidenceEventIds).filter((id) => eventIds.has(id));
     const counterEvidenceEventIds = unique(judgment.counterEvidenceEventIds ?? []).filter((id) => eventIds.has(id));
+    const nativeEvidence = judgment.nativeEvidence?.filter(isNativeVerifierEvidence) ?? [];
+    const nativeEvidenceSupportsStatus =
+      (target === "final_output" || target === "artifact") &&
+      ((status === "covered" && nativeEvidence.some((evidence) => evidence.status === "passed")) ||
+        (status === "violated" && nativeEvidence.some((evidence) => evidence.status === "failed")));
     const evidenceRequired = status === "covered" || status === "violated";
-    const safeStatus: CoverageStatus = evidenceRequired && !evidenceEventIds.length ? "unknown" : status;
-    const analyzedConstraint = normalizeAnalyzedConstraint(judgment.analyzedConstraint, unit);
+    const safeStatus: CoverageStatus = evidenceRequired && !evidenceEventIds.length && !nativeEvidenceSupportsStatus ? "unknown" : status;
 
     findings.push({
       id: judgment.findingId || `coverage.agent.${String(index + 1).padStart(3, "0")}`,
       unitId: unit.id,
+      constraintId: judgment.constraintId,
       analyzedConstraint,
+      target,
       status: safeStatus,
       confidence: clamp(judgment.confidence, 0, 1),
       rationale:
@@ -273,7 +291,8 @@ export function applyAgentJudgeResponse(
       suggestedRewrite: judgment.suggestedRewrite ?? null,
       candidateEventIds: [],
       analysisMethod: method,
-      analysisRecipe: `${response.schemaVersion}:${response.requestId}`
+      analysisRecipe: `${response.schemaVersion}:${response.requestId}`,
+      nativeEvidence: nativeEvidence.length ? nativeEvidence : undefined
     });
   });
 
@@ -385,6 +404,12 @@ function normalizeJudgment(value: unknown, index: number): AgentJudgment {
           ? object.id
           : `coverage.agent.${String(index + 1).padStart(3, "0")}`,
     unitId: typeof object.unitId === "string" ? object.unitId : typeof object.unit_id === "string" ? object.unit_id : "",
+    constraintId:
+      typeof object.constraintId === "string"
+        ? object.constraintId
+        : typeof object.constraint_id === "string"
+          ? object.constraint_id
+          : undefined,
     analyzedConstraint: {
       kind: typeof constraintObject.kind === "string" ? constraintObject.kind : typeof object.kind === "string" ? object.kind : "other",
       text,
@@ -394,7 +419,8 @@ function normalizeJudgment(value: unknown, index: number): AgentJudgment {
           : typeof object.severity === "string"
             ? object.severity
             : "info",
-      sourceSpan: span as SourceSpan
+      sourceSpan: span as SourceSpan,
+      target: normalizeCoverageTarget(constraintObject.target ?? object.target)
     },
     status: isCoverageStatus(object.status) ? object.status : "unknown",
     confidence: typeof object.confidence === "number" ? object.confidence : 0,
@@ -406,7 +432,9 @@ function normalizeJudgment(value: unknown, index: number): AgentJudgment {
         ? object.suggestedRewrite
         : typeof object.suggested_rewrite === "string"
           ? object.suggested_rewrite
-          : null
+          : null,
+    target: normalizeCoverageTarget(object.target ?? constraintObject.target),
+    nativeEvidence: normalizeNativeEvidenceArray(object.nativeEvidence ?? object.native_evidence)
   };
 }
 
@@ -451,6 +479,7 @@ function normalizeExtractedConstraint(
     text,
     severity: typeof object.severity === "string" ? object.severity : unit.modality,
     sourceSpan,
+    target: normalizeCoverageTarget(object.target),
     rationale: typeof object.rationale === "string" ? object.rationale : undefined
   };
 }
@@ -586,15 +615,17 @@ function normalizeSourceSpan(value: unknown, unit: SkillUnit, fallbackText: stri
   };
 }
 
-function normalizeAnalyzedConstraint(input: AgentAnalyzedConstraint, unit: SkillUnit): CoverageFinding["analyzedConstraint"] {
+function normalizeAnalyzedConstraint(input: AgentAnalyzedConstraint, unit: SkillUnit): NonNullable<CoverageFinding["analyzedConstraint"]> {
   const span = normalizeSourceSpan(input.sourceSpan, unit, input.text || unit.text);
   const lineStart = clampNumber(span.lineStart, unit.lineStart, unit.lineEnd);
   const lineEnd = clampNumber(span.lineEnd, unit.lineStart, unit.lineEnd);
   const charStart = Math.max(0, Math.floor(span.charStart ?? 0));
   const charEnd = Math.max(charStart, Math.floor(span.charEnd ?? (input.text || unit.text).length));
+  const kind = input.kind || "instruction";
+  const text = input.text || span.text || unit.text;
   return {
-    kind: input.kind || "instruction",
-    text: input.text || span.text || unit.text,
+    kind,
+    text,
     severity: input.severity || unit.modality,
     span: {
       lineStart: Math.min(lineStart, lineEnd),
@@ -602,8 +633,59 @@ function normalizeAnalyzedConstraint(input: AgentAnalyzedConstraint, unit: Skill
       charStart,
       charEnd,
       text: span.text || input.text || unit.text
-    }
+    },
+    target: input.target ?? inferCoverageTarget(text, kind)
   };
+}
+
+function normalizeCoverageTarget(value: unknown): CoverageTarget | undefined {
+  return value === "process" ||
+    value === "final_output" ||
+    value === "artifact" ||
+    value === "tool_use" ||
+    value === "reporting" ||
+    value === "unknown"
+    ? value
+    : undefined;
+}
+
+function inferCoverageTarget(text: string, kind = ""): CoverageTarget {
+  const haystack = `${kind} ${text}`.toLowerCase();
+  if (/\b(final output|output contract|solution\.json|schedule\.csv|reward\.json|output\.json|final artifact|csv|json field|must be empty|should be empty|no .*violations?|valid schema|format constraint)\b/.test(haystack)) {
+    return "final_output";
+  }
+  if (/\b(file|path|write|read|artifact|created|updated|edited)\b/.test(haystack)) {
+    return "artifact";
+  }
+  if (/\b(command|tool|call|run|execute|pytest|npm|codex|claude|browser|screenshot)\b/.test(haystack)) {
+    return "tool_use";
+  }
+  if (/\b(final response|report|explain|tell the user|summary|markdown review)\b/.test(haystack)) {
+    return "reporting";
+  }
+  if (/\b(before|after|order|process|iterate|first|then|immediately|score|sort|select|branch|workflow|driver|validation before)\b/.test(haystack)) {
+    return "process";
+  }
+  return "unknown";
+}
+
+function normalizeNativeEvidenceArray(value: unknown): NativeVerifierEvidence[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized = value.filter(isNativeVerifierEvidence);
+  return normalized.length ? normalized : undefined;
+}
+
+function isNativeVerifierEvidence(value: unknown): value is NativeVerifierEvidence {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const object = value as Record<string, unknown>;
+  return (
+    typeof object.source === "string" &&
+    (object.status === "passed" || object.status === "failed" || object.status === "unknown")
+  );
 }
 
 function spanNumberValue(object: Record<string, unknown>, keys: string[], fallback: number): number {
