@@ -43,10 +43,12 @@ interface CliOptions {
   trials: number;
   taskIds: string[];
   includeNoSkill: boolean;
-    maxTasks?: number;
-    maxAgentAnalyses?: number;
-    agentTimeoutMs: number;
-    minFailures: number;
+  maxTasks?: number;
+  maxAgentAnalyses?: number;
+  agentTimeoutMs: number;
+  minFailures: number;
+  optimizeNcThreshold: number;
+  optimizeStablePass: boolean;
   maxEditsPerSkill: number;
   force: boolean;
   remoteHost?: string;
@@ -120,7 +122,7 @@ interface AnalysisRecord {
   violationRate: number;
   ignoredRate: number;
   unknownRate: number;
-  targetCounts: Record<CoverageTarget, Record<CoverageStatus, number>>;
+  targetCounts?: Record<CoverageTarget, Record<CoverageStatus, number>>;
   analysisPath: string;
   nativeVerifier?: NativeVerifierSummary;
 }
@@ -593,7 +595,7 @@ function buildBatchAnalyzerPrompt(input: {
 }): string {
   return `You were launched by SkillScope's SkillsBench batch experiment.
 
-Do not analyze the current conversation. Analyze only the selected SkillsBench trial and skill file described by these local files.
+Scope: analyze only the selected SkillsBench trial and skill file described by these local files.
 
 Use this analyzer skill and follow its workflow:
 ${input.analyzerSkillPath}
@@ -621,16 +623,16 @@ Important:
 - Start from constraint-seed.json. Review, split, merge true duplicates, and add missing observable constraints.
 - Write constraints.json early, then skill-graph.json, then trace-facts.json, then findings.json.
 - Use a program-analysis workflow: skill source -> constraint/control-flow graph; trace events -> trace facts; graph x facts -> covered, violated, missed, not_applicable, unknown.
-- Use native-verifier.json as hard deterministic evidence for final-output/artifact contracts. If the native verifier passes, do not report final-output constraints as violated or missed solely from trace uncertainty; instead separate any remaining issue as a process-adherence gap.
+- Use native-verifier.json as hard deterministic evidence for final-output/artifact contracts. If the native verifier passes, treat final-output constraints as satisfied by verifier evidence and separate any remaining trace uncertainty as a process-adherence gap.
 - Classify each extracted constraint with a target when possible: "final_output", "artifact", "process", "tool_use", "reporting", or "unknown".
 - Validation-order rules such as "validate before writing" or "run checks before final answer" are process/tool-use constraints, not final-output constraints. Native verifier pass proves artifact validity, not validation ordering.
-- Keep all observable mandatory/prohibited/order/validation/final-output constraints. Do not shrink a long skill to only salient examples.
+- Keep all observable mandatory/prohibited/order/validation/final-output constraints. A long skill should produce a complete check plan rather than only the most salient examples.
 - findings.json should contain one finding for every extracted constraint. Use "unknown" if evidence was not inspected enough.
 - Distinguish missed from violated: absence of required behavior is missed; explicit conflicting behavior is violated.
-- Do not optimize or rewrite the skill in this analyzer pass. Leave optimized-skill.md untouched; SkillScope's propose command launches the optimizer skill after findings.json is saved.
-- Cite real event IDs from trace-events.json. Do not invent evidence IDs.
-- Do not use web search or network access; all evidence is local.
-- Do not modify repository source files. Only write artifacts in the work directory above.
+- This pass is analysis only. Leave optimized-skill.md untouched; SkillScope's propose command launches the optimizer skill after findings.json is saved.
+- Cite real event IDs from trace-events.json. Evidence IDs should come from the selected trace.
+- Use only local evidence; web search and network access are outside this analysis scope.
+- Write only artifacts in the work directory above.
 - Final response can be Markdown and does not need a strict schema.
 
 Request summary:
@@ -932,6 +934,21 @@ async function proposeOptimizedSkills(options: CliOptions) {
     if (options.maxAgentAnalyses && launched >= options.maxAgentAnalyses) {
       break;
     }
+    const gate = optimizationCandidateGate(records, options);
+    if (!gate.optimize) {
+      patches[key] = {
+        passThroughReason: gate.reason,
+        skipped: gate.reason,
+        recordCount: records.length,
+        totalFailures: records.reduce((sum, record) => sum + record.counts.missed + record.counts.violated, 0),
+        noncomplianceRate: gate.noncomplianceRate,
+        nativeFailed: gate.nativeFailed,
+        finalArtifactFailures: gate.finalArtifactFailures,
+        processOnlyFailures: gate.processOnlyFailures
+      };
+      console.log(`[propose] pass-through ${key}: ${gate.reason}`);
+      continue;
+    }
     const [taskId, skillRelPath] = key.split("::");
     const task = tasksById.get(taskId);
     if (!task) {
@@ -988,7 +1005,7 @@ async function proposeOptimizedSkills(options: CliOptions) {
   await writeFile(path.join(outRoot, "skill-patches.json"), `${JSON.stringify(patches, null, 2)}\n`);
   await writeFile(path.join(outRoot, "skill-patches.md"), renderFrameworkPatchSummary(patches));
   console.log(`Wrote framework-optimized skill candidates under ${outRoot}`);
-  console.log("Each candidate was generated from SkillScope constraints/graph/trace-facts/findings artifacts.");
+  console.log("Optimizer candidates and pass-through decisions were based on SkillScope constraints/graph/trace-facts/findings artifacts.");
 }
 
 async function createOptimizedRerunPlan(options: CliOptions) {
@@ -1836,7 +1853,9 @@ function aggregateRates(
     for (const status of Object.keys(counts) as CoverageStatus[]) {
       counts[status] += record.counts[status] ?? 0;
     }
-    mergeTargetCounts(targetCounts, record.targetCounts);
+    if (record.targetCounts) {
+      mergeTargetCounts(targetCounts, record.targetCounts);
+    }
     if (record.passed !== null) {
       passKnown += 1;
       if (record.passed) {
@@ -1992,6 +2011,82 @@ function groupAnalysisRecordsForOptimization(
     );
   }
   return groups;
+}
+
+function optimizationCandidateGate(
+  records: AnalysisRecord[],
+  options: CliOptions
+): {
+  optimize: boolean;
+  reason: string;
+  noncomplianceRate: number;
+  nativeFailed: boolean;
+  finalArtifactFailures: number;
+  processOnlyFailures: boolean;
+} {
+  const counts = records.reduce((acc, record) => {
+    for (const key of Object.keys(acc) as CoverageStatus[]) {
+      acc[key] += record.counts[key] ?? 0;
+    }
+    return acc;
+  }, emptyCounts());
+  const judgedReachable = counts.covered + counts.missed + counts.violated;
+  const noncomplianceRate = judgedReachable ? (counts.missed + counts.violated) / judgedReachable : 0;
+  const finalArtifactFailures = records.reduce(
+    (sum, record) =>
+      sum +
+      targetFailureCount(record.targetCounts?.final_output) +
+      targetFailureCount(record.targetCounts?.artifact),
+    0
+  );
+  const totalFailures = records.reduce((sum, record) => sum + record.counts.missed + record.counts.violated, 0);
+  const nativeFailed = records.some(
+    (record) =>
+      record.passed === false ||
+      (typeof record.reward === "number" && record.reward < 1) ||
+      record.nativeVerifier?.passed === false ||
+      (typeof record.nativeVerifier?.reward === "number" && record.nativeVerifier.reward < 1)
+  );
+  const nativePassed = records.length > 0 && records.every(
+    (record) =>
+      record.passed === true ||
+      record.reward === 1 ||
+      record.nativeVerifier?.passed === true ||
+      record.nativeVerifier?.reward === 1
+  );
+  const processOnlyFailures = totalFailures > 0 && finalArtifactFailures === 0;
+
+  if (nativeFailed) {
+    return { optimize: true, reason: "native verifier failed", noncomplianceRate, nativeFailed, finalArtifactFailures, processOnlyFailures };
+  }
+  if (finalArtifactFailures > 0) {
+    return { optimize: true, reason: "final-output/artifact failures present", noncomplianceRate, nativeFailed, finalArtifactFailures, processOnlyFailures };
+  }
+  if (noncomplianceRate >= options.optimizeNcThreshold) {
+    return { optimize: true, reason: `non-compliance ${percent(noncomplianceRate)} >= ${percent(options.optimizeNcThreshold)}`, noncomplianceRate, nativeFailed, finalArtifactFailures, processOnlyFailures };
+  }
+  if (nativePassed && processOnlyFailures && !options.optimizeStablePass) {
+    return {
+      optimize: false,
+      reason: `native pass with low non-compliance (${percent(noncomplianceRate)}) and process/reporting-only failures`,
+      noncomplianceRate,
+      nativeFailed,
+      finalArtifactFailures,
+      processOnlyFailures
+    };
+  }
+  return {
+    optimize: false,
+    reason: `below optimization threshold (${percent(noncomplianceRate)} < ${percent(options.optimizeNcThreshold)}) with no final-output/artifact failure`,
+    noncomplianceRate,
+    nativeFailed,
+    finalArtifactFailures,
+    processOnlyFailures
+  };
+}
+
+function targetFailureCount(counts: Record<CoverageStatus, number> | undefined): number {
+  return (counts?.missed ?? 0) + (counts?.violated ?? 0);
 }
 
 async function prepareFrameworkOptimizationInput(input: {
@@ -2373,15 +2468,16 @@ function renderFrameworkPatchSummary(patches: Record<string, unknown>): string {
   const lines = [
     "# SkillScope Framework-Optimized Skill Candidates",
     "",
-    "These candidates were generated by launching the SkillScope optimizer skill over saved analysis IR: constraints, skill graph, trace facts, and findings.",
+    "These entries were produced from saved SkillScope analysis IR: constraints, skill graph, trace facts, and findings. Some entries are optimizer-generated candidates; pass-through entries keep the current skill for rerun.",
     "",
     "| skill | records | failures | cached | optimized skill | report |",
     "|---|---:|---:|---|---|---|"
   ];
   for (const [key, value] of Object.entries(patches)) {
     const item = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    const report = stringFrom(item.optimizationReportPath) || stringFrom(item.passThroughReason) || stringFrom(item.skipped);
     lines.push(
-      `| ${escapeCell(key)} | ${item.recordCount ?? ""} | ${item.totalFailures ?? ""} | ${item.cached ?? ""} | ${escapeCell(stringFrom(item.optimizedSkillPath))} | ${escapeCell(stringFrom(item.optimizationReportPath))} |`
+      `| ${escapeCell(key)} | ${item.recordCount ?? ""} | ${item.totalFailures ?? ""} | ${item.cached ?? ""} | ${escapeCell(stringFrom(item.optimizedSkillPath))} | ${escapeCell(report)} |`
     );
   }
   return `${lines.join("\n")}\n`;
@@ -2445,6 +2541,8 @@ function parseArgs(args: string[]): CliOptions {
     includeNoSkill: false,
     agentTimeoutMs: 600000,
     minFailures: 1,
+    optimizeNcThreshold: 0.1,
+    optimizeStablePass: false,
     maxEditsPerSkill: 3,
     force: false,
     benchExtraArgs: []
@@ -2530,6 +2628,16 @@ function parseArgs(args: string[]): CliOptions {
       case "min-failures":
         options.minFailures = Number.parseInt(next, 10) || options.minFailures;
         index += 1;
+        break;
+      case "optimize-nc-threshold":
+        options.optimizeNcThreshold = Number.parseFloat(next);
+        if (!Number.isFinite(options.optimizeNcThreshold) || options.optimizeNcThreshold < 0) {
+          options.optimizeNcThreshold = 0.1;
+        }
+        index += 1;
+        break;
+      case "optimize-stable-pass":
+        options.optimizeStablePass = true;
         break;
       case "max-edits-per-skill":
         options.maxEditsPerSkill = Number.parseInt(next, 10) || options.maxEditsPerSkill;
@@ -2803,6 +2911,8 @@ Options:
   --remote-host            Default SSH target for generated remote runner, e.g. user@host.
   --remote-dir             Remote SkillScope checkout path. Default: SkillScope in the remote home.
   --min-failures           Minimum violated+missed findings before optimizing a skill. Default: 1.
+  --optimize-nc-threshold  Minimum non-compliance rate for optimizing native-passing process-only misses. Default: 0.1.
+  --optimize-stable-pass   Also optimize native-passing low-NC skills with only process/reporting failures.
   --max-edits-per-skill    Cap generated patch bullets per skill. Default: 3.`);
 }
 

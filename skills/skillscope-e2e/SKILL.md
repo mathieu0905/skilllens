@@ -20,7 +20,7 @@ original skill run
   -> compare native accuracy and skill adherence
 ```
 
-Do not manually rewrite skills outside this loop. The optimizer must use SkillScope artifacts: `constraints.json`, `skill-graph.json`, `trace-facts.json`, `findings.json`, and native verifier evidence when available.
+Route skill rewrites through this loop. The optimizer uses SkillScope artifacts: `constraints.json`, `skill-graph.json`, `trace-facts.json`, `findings.json`, and native verifier evidence when available.
 
 ## Agent Decomposition
 
@@ -45,13 +45,13 @@ Recommended phase agents:
 | `optimized-judge-agent` | `skillscope-analyzer` | one optimized trial plus one optimized skill | analyzer IR and findings |
 | `comparison-agent` | `skillscope-e2e` | original vs optimized aggregate | metrics table and scale/stop decision |
 
-Do not pass full trace text through agent prompts when a file path exists. Prompts should pass paths, task IDs, trial IDs, and the expected output directory. Large batches should shard runner agents by task set and let the `judge` / `propose` commands launch per-skill Codex analyzer or optimizer runs with cache reuse.
+Pass file paths, task IDs, trial IDs, and the expected output directory through phase-agent prompts. Large batches should shard runner agents by task set and let the `judge` / `propose` commands launch per-skill Codex analyzer or optimizer runs with cache reuse.
 
 The outer e2e agent must not perform blind trace analysis itself. It should inspect aggregate reports and handoff artifacts, then launch the correct phase agent or command for the next step.
 
 ## Versioning Rule
 
-Use git commits for code and workflow versions. Use semantic experiment names for artifacts. Do not create endless `v1`, `v2`, `v8` experiment directories as the version system.
+Use git commits for code and workflow versions. Use semantic experiment names for artifacts. Keep rollback and comparison in git history, branches, tags, and commit hashes rather than artifact directory numbering.
 
 Good artifact names:
 
@@ -72,7 +72,30 @@ Default to a staged rollout:
 
 For a first broad validation, choose 20-30 default runnable tasks unless the user asks for all 87. If the user names tasks, use exactly those tasks.
 
-Do not run multiple writers into the same experiment directory. For parallel work, create separate semantic shard directories and merge comparisons afterward.
+Give each parallel writer a separate semantic shard directory, then merge comparisons afterward.
+
+## Optimization Candidate Gate
+
+Select optimization candidates before launching `skillscope-optimizer`.
+
+Optimize a task/skill only when at least one condition holds:
+
+- the native verifier failed or reward is below pass;
+- SkillScope found `violated` or `missed` findings on `final_output` or `artifact` targets;
+- non-compliance is high, default threshold `>= 10%`;
+- the same reachable constraint fails across multiple traces or sibling tasks;
+- the user explicitly asks to improve process observability.
+
+Use the current skill as the rerun candidate, without launching a rewrite, when all of these are true:
+
+- native verifier already passes;
+- non-compliance is low, default `< 10%`;
+- remaining failures are only `process`, `tool_use`, `reporting`, or `unknown` targets;
+- no repeated failure pattern exists.
+
+For pass-through candidates, record the reason in `skill-patches.json` / `skill-patches.md`.
+
+This gate keeps successful low-NC examples focused on preserving the working output contract instead of process-only hardening.
 
 ## Preflight
 
@@ -178,7 +201,7 @@ Judge outputs to inspect:
 
 Agent: `optimizer-agent` using `$skillscope-optimizer`.
 
-Generate optimized skill candidates from the original analysis:
+Generate optimized skill candidates from the original analysis. The `propose` command applies the candidate gate above by default:
 
 ```bash
 npm run skillsbench -- propose \
@@ -186,9 +209,12 @@ npm run skillsbench -- propose \
   --analysis .skilllens/experiments/<slug>/original/agent-analysis/violation-rates.json \
   --out .skilllens/experiments/<slug>/optimized-skills \
   --min-failures 1 \
+  --optimize-nc-threshold 0.1 \
   --max-edits-per-skill 4 \
   --agent-timeout-ms 1200000
 ```
+
+Reserve `--optimize-stable-pass` for a deliberate observability-hardening experiment. Keep it off for the default SkillsBench optimization loop.
 
 Before rerun, spot-check generated optimizer artifacts:
 
@@ -197,12 +223,13 @@ Before rerun, spot-check generated optimizer artifacts:
 - `.optimization-inputs/**/optimization-packet.json`
 - optimized `SKILL.md`
 
-Reject or revise proposals that:
+Accept proposals that:
 
-- add defensive history such as "do not use old logic";
-- hardcode one trace's filenames, operation IDs, numbers, or verifier messages unless they are part of the task contract;
-- turn reference-code helper details into mandatory process constraints;
-- remove native-verifier-backed output invariants.
+- express the next-run workflow directly with entry conditions, ordered steps, validation checkpoints, and output contracts;
+- use positive, procedural language for new or changed text instead of history-shaped patch notes;
+- generalize from evidence to task contracts instead of copying one trace's incidental filenames, operation IDs, numbers, or verifier text;
+- keep reference-code helper details illustrative unless the exact detail is part of the contract;
+- preserve native-verifier-backed output invariants and covered constraints unless the edit is an equivalent clarification or directly tied to a failed neighboring constraint.
 
 ## Phase 5: Rerun Optimized Skills
 
@@ -298,12 +325,14 @@ Continue to a larger batch only if:
 - optimized native reward pass rate is not worse, or any drop is explained by environment/provider failures rather than skill changes;
 - final_output/artifact non-compliance decreases or stays at zero;
 - total missed + violated decreases on judged reachable constraints;
+- native-passing low-NC tasks used the pass-through path;
 - remaining failures are understandable and not repeated across many tasks.
 
 Stop and diagnose if:
 
 - optimized native reward drops on multiple tasks;
-- optimizer adds long defensive clauses or trace-specific hardcoding;
+- any previously native-passing low-NC task regresses after optimization;
+- optimizer writes history-shaped clauses, blame notes, or trace-specific hardcoding instead of a positive workflow;
 - SkillScope non-compliance improves only by deleting meaningful constraints;
 - agent judge produces many `unknown` findings because the trace or output artifact is insufficient.
 

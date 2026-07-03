@@ -7,7 +7,7 @@ description: Analyze one selected SkillScope skill-use window by extracting prec
 
 ## Purpose
 
-Analyze the selected skill-use window only. Do not analyze the current chat or the whole machine history unless an input file explicitly points to it.
+Analyze the selected skill-use window only. Current chat or whole-machine history is out of scope unless an input file explicitly points to it.
 
 SkillScope provides file paths for the selected skill, normalized skill units, normalized trace events, raw trace text, and output artifacts. Follow those files, not assumptions.
 
@@ -25,7 +25,7 @@ SkillScope provides file paths for the selected skill, normalized skill units, n
 10. Update graph branch/path state after trace inspection.
 11. Append concise progress notes to `progress.md` after each meaningful stage.
 12. Write `findings.json` when you have coverage judgments worth surfacing.
-13. Do not rewrite or optimize the skill in this analyzer pass; SkillScope launches `skillscope-optimizer` after `findings.json` is saved.
+13. Keep this pass focused on analysis artifacts; SkillScope launches `skillscope-optimizer` after `findings.json` is saved.
 14. Finish with a human-readable report citing evidence event IDs and native verifier facts where used.
 
 ## Program Analysis Model
@@ -39,7 +39,7 @@ Use this compiler-style analysis pipeline:
    - Parse bullets, numbered items, tables, examples, and output schemas into fine-grained constraints.
    - Classify constraints into `condition`, `obligation`, `prohibition`, `ordering`, `numeric_bound`, `command_contract`, `file_contract`, `evidence_requirement`, and `final_output_contract`.
    - Also classify each constraint target as `final_output`, `artifact`, `process`, `tool_use`, `reporting`, or `unknown`.
-   - Classify whether each constraint is a hard contract, soft recommendation, or implementation hint. Do not treat illustrative/reference code internals as hard process constraints unless surrounding prose says they are mandatory.
+   - Classify whether each constraint is a hard contract, soft recommendation, or implementation hint. Treat illustrative/reference code internals as hints unless surrounding prose says they are mandatory.
    - Keep precise source spans. If one sentence contains two obligations or an obligation plus a condition, split it.
 
 2. **Skill CFG / control dependence**
@@ -51,6 +51,8 @@ Use this compiler-style analysis pipeline:
 3. **Trace fact extraction**
    - Compile `trace-events.json` into facts before making judgments.
    - Facts should be structural, not just keywords: commands executed, tools called, files read, files edited, paths mentioned, final JSON fields, output shape, user interruption boundaries, event ranges inspected, and discovered candidate artifacts.
+   - Treat lexical matches as retrieval hints only. A keyword hit may nominate an event to inspect, but it never proves coverage by itself.
+   - For each candidate event, read enough surrounding events, tool outputs, file/artifact facts, and final-response fields to decide whether the semantic contract was actually satisfied.
    - Write these facts to `trace-facts.json` so the UI and developer can inspect the intermediate representation.
 
 4. **Path-sensitive coverage**
@@ -61,7 +63,7 @@ Use this compiler-style analysis pipeline:
    - For ordering rules, compare event indices, not text similarity.
    - For numeric/output contracts, parse values where possible and compare exact counts/fields.
    - For final-output or artifact contracts, use native verifier facts as hard evidence when available.
-   - Do not use native verifier pass/fail to prove process-adherence constraints such as exact tool sequence, scoring order, or whether validation happened before writing.
+   - Use native verifier pass/fail only for final-output/artifact contracts, not process-adherence constraints such as exact tool sequence, scoring order, or whether validation happened before writing.
    - Treat "validate before writing", "run check before final answer", "call verifier before emitting", and other before/after validation-order rules as `target: "process"` or `target: "tool_use"`, not `target: "final_output"`. Native verifier pass can prove the final artifact is valid, but it cannot prove the required validation order occurred.
 
 5. **Evidence slicing**
@@ -71,7 +73,7 @@ Use this compiler-style analysis pipeline:
 - If reachability or facts are incomplete, use `unknown`.
 
 6. **Optimization handoff**
-   - Do not edit the skill text here.
+   - Leave skill text editing to the optimizer pass.
    - Make violated and missed findings precise enough for `skillscope-optimizer` to turn them into a minimal patch.
    - Include branch state, evidence event IDs, and suggested rewrite hints only when the trace supports them.
 
@@ -172,20 +174,21 @@ Use `branchState` values:
 - `checked`: the node was inspected but is not a conditional branch.
 - `unknown`: the trace was insufficient to know whether the branch applied.
 
-The graph is a working artifact. Update it as trace evidence changes. Do not wait until the final answer if you already know the skill structure.
+The graph is a working artifact. Update it as trace evidence changes, starting as soon as the skill structure is clear.
 
 ## Native Verifier Evidence
 
 When `native-verifier.json` is present, read it before final coverage judgment. This file may contain SkillsBench verifier results, CTRF pytest summaries, failed assertion names, and reward/pass metadata.
 
 Use it with strict scope:
+- If the native verifier fails, map failed assertion names and messages to final-output/artifact constraints before judging process constraints. Native failures are the strongest signal for optimization direction.
 - If the native verifier passes, final-output and artifact constraints covered by that verifier should not be reported as output-level `violated` or `missed` merely because the trace did not show the internal check. Mark them `covered` with `target: "final_output"` or `target: "artifact"` and mention the native verifier evidence.
 - If the native verifier fails, map failed tests to related final-output/artifact constraints when the assertion text is specific enough. This can support `violated` for final-output constraints.
 - Native verifier evidence does not prove that the agent followed the specified process. If a skill explicitly requires "run validation before writing", "iterate keys in this order", or "score candidates with this tuple", judge that as `process` using trace/code evidence.
 - If final artifacts pass but process evidence conflicts with the skill, report the process issue as `target: "process"` and make the rationale clear: final output passed, but process adherence differed.
-- If final artifacts pass and the only conflict is with a reference-code helper detail or heuristic tie-breaker, prefer `covered` for the semantic contract and `unknown` or low-severity `process` only when the skill clearly intended exact helper fidelity. Do not inflate helper fidelity gaps into primary non-compliance.
+- If final artifacts pass and the only conflict is with a reference-code helper detail or heuristic tie-breaker, prefer `covered` for the semantic contract and `unknown` or low-severity `process` only when the skill clearly intended exact helper fidelity. Keep helper fidelity gaps separate from primary non-compliance.
 - A constraint about the final artifact's fields, schema, feasibility, or score is `final_output`/`artifact`. A constraint about when the agent checked those fields, which script it used, or whether it checked before writing is `process`/`tool_use`.
-- Do not collapse process gaps into final-output failures.
+- Keep process gaps separate from final-output failures.
 
 ## Trace Facts
 
@@ -233,7 +236,7 @@ Useful fact kinds include:
 - `session_boundary`
 - `absence_checked`
 
-For ignored obligations, an `absence_checked` fact is valuable: it records which event range was inspected and which required signal was absent. Do not use absence facts for `violated`; violations require a positive conflicting fact.
+For ignored obligations, an `absence_checked` fact is valuable: it records which event range was inspected and which required signal was absent. Use positive conflicting facts for `violated`; use absence facts for `missed`.
 
 ## Trace Inspection
 
@@ -247,16 +250,22 @@ Use normalized event IDs when citing evidence. Check both content and structure:
 - User interruptions or new requests that end a skill-use window.
 - Missing evidence where the skill required observable behavior.
 
-For long traces, chunk the trace by event ranges or task phases. Do not stop after the first matching event. Revisit constraints that require ordering, exact numbers, or negative evidence.
+For long traces, chunk the trace by event ranges or task phases. Continue beyond the first matching event and revisit constraints that require ordering, exact numbers, or negative evidence.
 
 When a constraint is satisfied only by inference, lower confidence and explain the inference. For `covered` and `violated`, cite evidence event IDs whenever possible. If there is no direct evidence, prefer `unknown`.
+
+Use keyword matches only as retrieval hints:
+- A command, file name, or phrase that resembles the instruction is only a candidate.
+- Confirm the required value, ordering, artifact field, validation result, branch predicate, or forbidden action in the trace/artifact before marking `covered` or `violated`.
+- For `missed`, inspect the full relevant event range from branch activation to skill-use end. If the trace hides edits or outputs and absence cannot be established, use `unknown` instead of `missed`.
+- For numeric/output constraints, parse the produced artifact or native verifier fact when available; final-message prose alone is weak evidence.
 
 Use three primary judgment categories for applicable constraints:
 - `covered` = followed / 遵循: the trace contains concrete evidence that the agent did what the constraint required.
 - `violated` = violated / 违反: the trace contains an active conflict with the constraint, such as a forbidden command, wrong output format, wrong order, wrong value, or opposite behavior.
 - `missed` = ignored / 忽略: the constraint applied, but the trace never shows the required action before the selected skill-use window ended.
 
-Do not collapse ignored into violated. Absence of a required action is `missed`; explicit contradictory behavior is `violated`.
+Keep ignored and violated separate. Absence of a required action is `missed`; explicit contradictory behavior is `violated`.
 
 ## Findings
 
@@ -276,13 +285,13 @@ Each useful finding should include:
 - `target`: `final_output`, `artifact`, `process`, `tool_use`, `reporting`, or `unknown`
 - `nativeEvidence` when a native verifier result is used as evidence
 
-Write a finding for every extracted constraint in `constraints.json`. If you did not inspect enough evidence for a constraint, write it as `unknown` with a rationale naming the uninspected or unobservable part. Do not silently omit lower-priority constraints after extraction.
+Write a finding for every extracted constraint in `constraints.json`. If evidence was not inspected enough for a constraint, write it as `unknown` with a rationale naming the uninspected or unobservable part. Include lower-priority constraints after extraction.
 
-Do not invent evidence IDs. If a status depends on absence of behavior, explain which trace range was inspected.
+Use evidence IDs from the selected trace. If a status depends on absence of behavior, explain which trace range was inspected.
 
 ## Optimization Handoff
 
-Do not write `optimized-skill.md` in this analyzer. Make `findings.json`, `skill-graph.json`, and `trace-facts.json` precise enough that `skillscope-optimizer` can later revise the skill without rereading the whole trace blindly.
+Leave `optimized-skill.md` for the optimizer pass. Make `findings.json`, `skill-graph.json`, and `trace-facts.json` precise enough that `skillscope-optimizer` can later revise the skill without rereading the whole trace blindly.
 
 For violated or missed findings, include:
 - The smallest source span for the failed constraint.

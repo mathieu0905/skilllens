@@ -31,7 +31,7 @@ export function buildSkillOptimizerPrompt(input: SkillOptimizerPromptInput): str
 
   return `You were launched by SkillScope's ${input.launcher === "browser" ? "browser UI after Start Analysis" : "SkillsBench optimization command"}.
 
-Do not analyze the current conversation. Optimize only the selected skill described by these local SkillScope artifacts.
+Scope: optimize only the selected skill described by these local SkillScope artifacts.
 
 Use this optimizer skill and follow it completely:
 ${input.optimizerSkillPath}
@@ -51,18 +51,19 @@ Write outputs here:
 - Machine-readable optimization packet: ${input.optimizationPacketPath}
 
 Rules:
-- The optimization must be based on constraints.json, skill-graph.json, trace-facts.json, and findings.json. Do not bypass those artifacts by manually summarizing the raw trace.
-- Use violated and missed findings as optimization evidence. Preserve nearby covered constraints unless they are redundant.
+- Base the optimization on constraints.json, skill-graph.json, trace-facts.json, and findings.json. Use the raw trace only as supporting evidence when those artifacts point to it.
+- Use violated and missed findings as optimization evidence. Treat covered findings and native-verifier-backed outputs as preservation anchors.
 - Distinguish violated from missed: violated needs an invariant/guard against explicit counter-behavior; missed needs reachability, ordering, observability, or validation improvements.
-- Distinguish final-output/artifact failures from process-adherence gaps. If native verifier evidence passes and the risky findings are mostly target:"process", do not make the process more brittle; relax or reframe over-specific procedure into output invariants, validation contracts, or flexible branch rules.
-- Keep hard contracts separate from implementation hints. Do not make exact helper internals, arbitrary safety bounds, exception text, candidate sort order, scoring tuples, or local tie-breakers mandatory unless the native verifier or findings prove that exact detail is required for correctness.
+- Distinguish final-output/artifact failures from process-adherence gaps. If native verifier evidence passes and the risky findings are mostly target:"process", relax or reframe over-specific procedure into output invariants, validation contracts, or flexible branch rules.
+- Keep hard contracts separate from implementation hints. Exact helper internals, arbitrary safety bounds, exception text, candidate sort order, scoring tuples, and local tie-breakers stay illustrative unless the native verifier or findings prove that exact detail is required for correctness.
 - If the skill includes reference code, label it as illustrative unless exact fidelity is required, and state the semantic contract in prose outside the snippet.
 - Prefer replacing, moving, merging, or deleting existing skill text before adding new bullets.
-- Do not add defensive boilerplate such as "no old logic", "do not repeat the previous mistake", "avoid previous failure", "be careful", or "be thorough".
+- Write added or changed instructions as positive workflow steps: entry condition, branch predicate, ordered action, validation checkpoint, or output contract. Omit historical, blame-oriented, or patch-note phrasing.
+- Keep satisfied constraints stable. Touch a covered source span only when the edit is an equivalent clarification, a better placement for the same invariant, or directly tied to a failed neighboring constraint.
 - Every added or changed instruction must map to a future trace fact, command, file artifact, event ordering relation, numeric bound, or output field.
 - In optimization-packet.json, label each edit with an editType such as "strengthen_output_contract", "add_validation", "clarify_branch", "relax_process", "merge_duplicate", "delete_unobservable", or "preserve".
-- In optimization-packet.json, every edit must include non-empty change text and either constraintIdsAddressed or constraintIdsPreserved. Do not emit null for these fields.
-- Do not modify repository source files. Only write the output artifacts listed above.
+- In optimization-packet.json, every edit must include non-empty change text and either constraintIdsAddressed or constraintIdsPreserved. Use empty arrays instead of null.
+- Write only the output artifacts listed above.
 - The final response can be Markdown and does not need a strict response schema.
 
 ${input.failureSummary ? `Failure summary from SkillScope:\n${input.failureSummary}\n` : ""}
