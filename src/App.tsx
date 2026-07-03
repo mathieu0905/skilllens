@@ -3864,6 +3864,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
           {filteredJobs.length ? (
             filteredJobs.map((job) => {
               const progress = progressWithTail(job, artifactTails);
+              const latestSummary = progress.latestLine ?? progress.detail;
               return (
                 <button
                   className={selectedJob?.id === job.id ? `agent-process-group job-card selected ${job.status}` : `agent-process-group job-card ${job.status}`}
@@ -3881,7 +3882,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
                   <JobProgress progress={progress} />
                   <div className="job-card-latest">
                     <span>Latest</span>
-                    <p>{progress.latestLine ?? progress.detail}</p>
+                    <p title={latestSummary}>{latestSummary}</p>
                   </div>
                   <div className="job-card-meta">
                     <span>{job.processes.length} proc</span>
@@ -4149,18 +4150,6 @@ function JobDetail({
       <div className="job-detail-summary">
         <span>{job.agentRoot?.label ?? "agent root unknown"} is protected</span>
         <span>Runtime {formatJobRuntimeForJob(job)} · Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
-        {sourceProcess ? (
-          <div className="job-source-summary">
-            <JobPathAction label="Working directory" value={sourceProcess.cwd} copied={copiedValue === sourceProcess.cwd} onCopy={() => void copyValue(sourceProcess.cwd)} copyLabel="Copy cwd" />
-            {sourceCommand ? (
-              <JobPathAction label="Command" value={sourceCommand} copied={copiedValue === sourceCommand} onCopy={() => void copyValue(sourceCommand)} copyLabel="Copy command" />
-            ) : null}
-          </div>
-        ) : null}
-        {primaryArtifact ? (
-          <JobPathAction label="Primary artifact" value={primaryArtifact.path} copied={copiedValue === primaryArtifact.path} onCopy={() => void copyValue(primaryArtifact.path)} />
-        ) : null}
-        {job.historyPath ? <JobPathAction label="History JSON" value={job.historyPath} copied={copiedValue === job.historyPath} onCopy={() => void copyValue(job.historyPath!)} /> : null}
       </div>
       <div className={`job-next-action ${nextAction.tone}`}>
         <span>Next action</span>
@@ -4179,6 +4168,22 @@ function JobDetail({
           </div>
         ) : null}
       </div>
+      {sourceProcess || primaryArtifact || job.historyPath ? (
+        <div className="job-detail-summary job-detail-context">
+          {sourceProcess ? (
+            <div className="job-source-summary">
+              <JobPathAction label="Working directory" value={sourceProcess.cwd} copied={copiedValue === sourceProcess.cwd} onCopy={() => void copyValue(sourceProcess.cwd)} copyLabel="Copy cwd" />
+              {sourceCommand ? (
+                <JobPathAction label="Command" value={sourceCommand} copied={copiedValue === sourceCommand} onCopy={() => void copyValue(sourceCommand)} copyLabel="Copy command" />
+              ) : null}
+            </div>
+          ) : null}
+          {primaryArtifact ? (
+            <JobPathAction label="Primary artifact" value={primaryArtifact.path} copied={copiedValue === primaryArtifact.path} onCopy={() => void copyValue(primaryArtifact.path)} />
+          ) : null}
+          {job.historyPath ? <JobPathAction label="History JSON" value={job.historyPath} copied={copiedValue === job.historyPath} onCopy={() => void copyValue(job.historyPath!)} /> : null}
+        </div>
+      ) : null}
       <JobProgress progress={progress} />
       <section>
         <h4>Latest Output</h4>

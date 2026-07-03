@@ -66,6 +66,7 @@ const baseEvidenceFeatures = [
   "active-job-card",
   "primary-stop-action",
   "job-source-context",
+  "job-card-latest-clamp",
   "job-runtime-display",
   "artifact-copy-actions",
   "artifact-output-copy",
@@ -153,6 +154,26 @@ async function main() {
       await browser.waitForText("Copy cwd", 15000);
       await browser.waitForText("Copy command", 15000);
       await captureEvidence(browser, "02ab-job-source-context-visible.png", "job-source-context", "job detail shows the working directory and command before the technical process tree");
+      await browser.waitForText("readable trace update", 15000);
+      const latestPreview = await browser.evaluate(`
+        (() => {
+          const card = [...document.querySelectorAll('.job-card')]
+            .find((node) => (node.textContent || '').includes('fake-codex-output.log'));
+          const latest = card?.querySelector('.job-card-latest p');
+          if (!latest) return { ok: false, reason: 'missing latest preview' };
+          const style = window.getComputedStyle(latest);
+          const lineHeight = Number.parseFloat(style.lineHeight || '0') || 16;
+          return {
+            ok: latest.clientHeight <= (lineHeight * 2.6) && (latest.getAttribute('title') || '').includes('readable trace update'),
+            height: latest.clientHeight,
+            lineHeight,
+            text: latest.textContent,
+            title: latest.getAttribute('title')
+          };
+        })()
+      `);
+      assert(latestPreview.result?.value?.ok === true, `latest output preview should stay scannable: ${JSON.stringify(latestPreview.result?.value)}`);
+      await captureEvidence(browser, "02ac-job-card-latest-clamped.png", "job-card-latest-clamp", "long structured latest output is summarized and clamped in job cards while remaining available in the detail");
       await browser.waitForText("runtime", 15000);
       await captureEvidence(browser, "02a-runtime-display-visible.png", "job-runtime-display", "active and stale jobs show wall-clock runtime instead of last-update age");
       await verifySearchSortAndLiveControls(browser);
@@ -515,7 +536,7 @@ set -euo pipefail
 artifact="$1"
 mkdir -p "$(dirname "$artifact")"
 echo "fake-codex-root $$" >> "$artifact"
-setsid bash -lc 'artifact="$1"; for i in $(seq 1 60); do echo "fake-codex-smoke-step-$i" >> "$artifact"; sleep 2; done' bash "$artifact" &
+setsid bash -lc 'artifact="$1"; for i in $(seq 1 60); do printf "{\\"type\\":\\"response_item\\",\\"payload\\":{\\"type\\":\\"message\\",\\"content\\":[{\\"type\\":\\"output_text\\",\\"text\\":\\"fake-codex-smoke-step-%s readable trace update with enough detail to prove long structured output stays scannable in the job card\\"}]}}\\n" "$i" >> "$artifact"; sleep 2; done' bash "$artifact" &
 child=$!
 wait "$child"
 `,

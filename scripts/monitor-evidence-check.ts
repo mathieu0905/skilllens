@@ -27,6 +27,7 @@ const baseEvidenceFeatures = [
   "active-job-card",
   "primary-stop-action",
   "job-source-context",
+  "job-card-latest-clamp",
   "job-runtime-display",
   "artifact-copy-actions",
   "artifact-output-copy",
