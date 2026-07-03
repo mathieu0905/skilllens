@@ -89,7 +89,8 @@ const baseEvidenceFeatures = [
   "recent-history",
   "issues-filter",
   "attention-sort",
-  "stale-job-filter"
+  "stale-job-filter",
+  "protected-root-no-stop"
 ];
 const dockerEvidenceFeatures = [
   "docker-job-filter",
@@ -417,6 +418,29 @@ async function runStaleJobCase() {
       await waitForSearchValue(browser, path.basename(staleArtifact), 5000);
       await browser.waitForText("stale-codex-output.log", 15000);
       await captureEvidence(browser, "06b-stale-job-visible.png", "stale-job-filter", "stale filter exposes jobs with no artifact/log updates for more than 30 seconds");
+      const protectedRoot = await browser.evaluate(`
+        (() => {
+          const card = [...document.querySelectorAll('.job-card')]
+            .find((node) => (node.textContent || '').includes('stale-codex-output.log'));
+          card?.scrollIntoView({ block: 'center' });
+          if (card instanceof HTMLElement) card.click();
+          const detail = document.querySelector('.job-detail');
+          const detailText = detail?.textContent || '';
+          const stopButtons = [...(detail?.querySelectorAll('button') || [])]
+            .filter((item) => /Preview stop|Execute stop/.test(item.textContent || ''));
+          return {
+            ok: detailText.includes('protected') &&
+              detailText.includes('no stoppable child task') &&
+              detailText.includes('protected agent root') &&
+              !detailText.includes('preview a safe stop') &&
+              stopButtons.length === 0,
+            detailText,
+            stopButtonCount: stopButtons.length
+          };
+        })()
+      `);
+      assert(protectedRoot.result?.value?.ok === true, `protected root should not expose stop controls: ${JSON.stringify(protectedRoot.result?.value)}`);
+      await captureEvidence(browser, "06c-protected-root-no-stop.png", "protected-root-no-stop", "external Codex root jobs show protected status and no stop button when no stoppable child task exists");
     } finally {
       await browser.close();
     }

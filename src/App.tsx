@@ -4493,6 +4493,13 @@ function jobNextAction(
     };
   }
   if (job.status === "stale") {
+    if (!job.canStop) {
+      return {
+        tone: "warn",
+        title: "Review the quiet root job",
+        body: "This job is only the protected agent root. Keep watching its latest output, or stop it from the owning terminal if it is truly stuck."
+      };
+    }
     return {
       tone: "warn",
       title: "Decide whether it is blocked",

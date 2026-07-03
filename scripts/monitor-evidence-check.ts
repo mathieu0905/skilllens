@@ -49,7 +49,8 @@ const baseEvidenceFeatures = [
   "recent-history",
   "issues-filter",
   "attention-sort",
-  "stale-job-filter"
+  "stale-job-filter",
+  "protected-root-no-stop"
 ];
 const dockerEvidenceFeatures = [
   "docker-job-filter",
