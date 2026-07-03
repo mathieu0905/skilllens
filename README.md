@@ -1,12 +1,22 @@
 # SkillScope
 
-Graph-guided coverage for agent skills.
+Local tools for agent skill coverage and long-running agent job monitoring.
 
 SkillScope is a local, plugin-first viewer for Codex and Claude Code sessions. It maps `SKILL.md` instructions to trace evidence, highlights the exact spans that were followed, violated, ignored, or not taken, and stores completed analyses in a local SQLite cache.
 
-SkillScope is not an agent runner, benchmark runner, or observability platform. It is a skill-aware scope on top of existing trajectories.
+The same local app also includes Agent Monitor: a job-oriented control room for long-running local Codex / Claude / Docker benchmark work. It shows jobs, progress, artifacts, containers, safe-stop previews, and stop results instead of a raw PID list.
 
-中文：SkillScope 是面向 Codex / Claude Code 的本地 skill 覆盖分析工具。它把 `SKILL.md` 里的约束和真实轨迹证据对齐，精确高亮遵循、违反、忽略、未走分支，并把分析结果缓存到本地 SQLite。
+中文：SkillScope 是一组本地 agent 工具。第一部分是面向 Codex / Claude Code 的 skill 覆盖分析：把 `SKILL.md` 里的约束和真实轨迹证据对齐，精确高亮遵循、违反、忽略、未走分支，并把分析结果缓存到本地 SQLite。第二部分是 Agent Monitor：面向本机长任务的任务控制室，展示 job、进度、产物、容器、安全停止预览和停止结果，而不是裸 PID 列表。
+
+## Two Modes / 两个模式
+
+- `SkillScope`: inspect skill usage in Codex / Claude Code traces, judge compliance, and produce evidence-backed rewrite proposals.
+- `Agent Monitor`: watch local long-running agent jobs, inspect artifacts and Docker containers, preview what a safe stop would touch, then stop only attributable child work.
+
+中文：
+
+- `SkillScope`：查看 Codex / Claude Code 轨迹里的 skill 使用窗口，判断合规性，并生成有证据的 skill 修改建议。
+- `Agent Monitor`：监控本机长时间运行的 agent 任务，查看产物和 Docker 容器，先预览安全停止范围，再只停止可归属的子任务。
 
 <p align="center">
   <img src="docs/assets/screenshots/skill-coverage.png" alt="SkillScope skill coverage heatmap with evidence panel" width="100%">
@@ -36,6 +46,8 @@ Early single-instance SkillsBench checks show the loop improving both verifier o
 
 ## What It Does / 功能
 
+SkillScope coverage:
+
 - Discovers local Codex and Claude Code sessions.
 - Groups traces by project, then shows individual skill-use windows instead of forcing whole-session analysis.
 - Highlights exact source spans in `SKILL.md`, not just whole lines.
@@ -46,7 +58,20 @@ Early single-instance SkillsBench checks show the loop improving both verifier o
 - Caches completed findings in `.skilllens/skillscope.sqlite`.
 - Produces anti-bloat skill rewrite proposals: minimal evidence-backed deltas, not automatic skill self-expansion.
 
+Agent Monitor:
+
+- Aggregates local agent work into jobs with status, root agent, runtime, progress, processes, containers, artifacts, and stale state.
+- Polls active jobs and artifact tails every 2 seconds.
+- Marks jobs stale after 30 seconds without artifact or log updates, but never auto-stops them.
+- Shows Active, Recent, Stale, Docker, and attention-oriented filters.
+- Previews safe stops before execution, including protected root agents, process groups, and Docker containers.
+- Protects external Codex / Claude root process groups from stop actions.
+- Cleans only containers listed in the stop preview, including detached Docker containers and Compose-project containers discovered through Docker labels.
+- Persists stopped job history as local JSON under `.skilllens/monitor-runs/<date>/<jobId>.json`.
+
 中文：
+
+SkillScope 覆盖分析：
 
 - 自动发现本机 Codex / Claude Code sessions。
 - 先按项目归类，再按单次 skill 使用窗口查看，不强制分析完整长对话。
@@ -57,6 +82,17 @@ Early single-instance SkillsBench checks show the loop improving both verifier o
 - 实时展示分析过程和产物。
 - 已完成结果保存到 `.skilllens/skillscope.sqlite`，刷新后可复用。
 - 对违反/忽略项生成 anti-bloat 的 skill 优化建议：只给有证据的最小补丁，不自动堆防御性废话。
+
+Agent Monitor：
+
+- 把本机 agent 工作聚合成 job，展示状态、root agent、运行时长、进度、进程、容器、产物和 stale 状态。
+- 每 2 秒刷新 active job 和 artifact tail。
+- 超过 30 秒无产物或日志更新时标记为 stale，但不会自动停止。
+- 提供 Active、Recent、Stale、Docker 和 attention 排序/过滤。
+- 停止前先展示 safe-stop preview，包括受保护 root agent、将停止的进程组和将清理的 Docker 容器。
+- 永远保护外部 Codex / Claude root 进程组。
+- 只清理 stop preview 中列出的容器，包括 detached Docker 容器，以及通过 Docker label 发现的 Compose project 容器。
+- 停止后的 job history 写入 `.skilllens/monitor-runs/<date>/<jobId>.json`。
 
 ## Quick Start / 快速开始
 
@@ -77,6 +113,12 @@ Open / 打开：
 http://localhost:5173
 ```
 
+Open Agent Monitor directly / 直接打开 Agent Monitor：
+
+```text
+http://localhost:5173/?view=monitor
+```
+
 Install the Codex slash prompt / 安装 Codex 入口：
 
 ```bash
@@ -92,6 +134,81 @@ Then run inside Codex / 然后在 Codex 中运行：
 The launcher captures the current session, identifies trace-proven skill files, writes a local capture bundle, and opens the browser UI.
 
 启动器会捕获当前 session，识别轨迹中能证明被使用的 skill 文件，写入本地 capture bundle，并打开浏览器界面。
+
+## Agent Monitor / Agent 任务监控
+
+Agent Monitor is for local single-user work: Codex / Claude runs, SkillsBench experiments, benchmark scripts, `docker run`, Docker Compose projects, and Docker-contained `codex-exec` jobs.
+
+中文：Agent Monitor 面向本机单用户工作：Codex / Claude 长任务、SkillsBench 实验、benchmark 脚本、`docker run`、Docker Compose project，以及 Docker 容器里的 `codex-exec` 任务。
+
+Run the app:
+
+```bash
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5173/?view=monitor
+```
+
+Use the control room:
+
+1. Keep `Live` enabled for 2-second refresh, or pause it while inspecting a stopped job.
+2. Use `Active`, `Recent`, `Stale`, `Docker`, search, and sort controls to find the job.
+3. Open a job to inspect progress, latest output, artifact tail, process tree, container details, and persisted history paths.
+4. Click the safe-stop preview action first. The preview shows protected root processes, stoppable child process groups, and containers that would be removed.
+5. Execute stop only after the preview. The result shows killed processes, removed containers, residual checks, cleanup errors, and the saved history JSON.
+
+安全规则：
+
+- 外部 Codex / Claude root process group 不会被停止。
+- 只有可归属到 agent job 的子任务 process group 可以停止。
+- Docker cleanup 只处理 stop preview 中列出的容器。
+- Compose project 通过 Docker labels 查找容器并 `docker rm -f`，不会运行 `docker compose down`。
+
+Local monitor data:
+
+- `.skilllens/monitor-runs/<date>/<jobId>.json`: stopped / recent job history with `lastStopResult`.
+- `.skilllens/monitor-smoke-screenshots/<run-id>/`: screenshot-backed verification reports.
+
+API surface:
+
+- `GET /api/agent-jobs`: active and recent jobs.
+- `POST /api/agent-jobs/:id/stop/preview`: safe-stop preview.
+- `POST /api/agent-jobs/:id/stop`: execute the previously previewed stop plan.
+- `GET /api/agent-processes`: compatibility endpoint for older process views.
+
+## Agent Monitor Verification / Agent Monitor 验证
+
+Every Agent Monitor feature is covered by screenshot-backed smoke evidence.
+
+Run the full core verification:
+
+```bash
+npm run monitor:verify
+```
+
+Run Docker coverage as well:
+
+```bash
+npm run monitor:verify:docker
+```
+
+These commands start a temporary local Vite server, exercise the monitor UI, validate the generated evidence manifest, print the report path, and stop the server.
+
+Evidence is written to:
+
+```text
+.skilllens/monitor-smoke-screenshots/<run-id>/evidence.md
+.skilllens/monitor-smoke-screenshots/<run-id>/evidence.json
+```
+
+The evidence contract currently checks 31 core screenshots and 42 Docker screenshots, including active job cards, live progress, stale state, protected root state, stop preview, stop result, recent history, detached Docker cleanup, Compose label cleanup, and Docker-contained `codex-exec` cleanup.
+
+See [docs/monitor-evidence.md](docs/monitor-evidence.md) for the complete feature-to-screenshot matrix.
 
 ## Browser Flow / 浏览器流程
 
