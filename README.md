@@ -242,6 +242,7 @@ bash .skilllens/experiments/<slug>/original/pull-prebuilt-images.sh
 
 SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
 SKILLSCOPE_SKIP_FAILED=1 \
+SKILLSCOPE_RUN_CONCURRENCY=4 \
   bash .skilllens/experiments/<slug>/original/run-original.sh
 
 npm run skillsbench -- collect \

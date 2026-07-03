@@ -65,6 +65,7 @@ To finish the rest of a batch before revisiting slow or broken environments:
 ```bash
 SKILLSCOPE_SKIP_FAILED=1 \
 SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
+SKILLSCOPE_RUN_CONCURRENCY=4 \
   bash .skilllens/experiments/skillsbench-codex-gpt55/run-original.sh
 ```
 

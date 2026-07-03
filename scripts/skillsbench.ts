@@ -1470,7 +1470,7 @@ ${images.map((image) => `docker pull ${shellQuote(image)}`).join("\n")}
 }
 
 function runTrialCommand(condition: string, taskId: string, trial: number, command: string): string {
-  return `run_trial ${shellQuote(condition)} ${shellQuote(taskId)} ${shellQuote(String(trial))} ${command}`;
+  return `queue_trial ${shellQuote(condition)} ${shellQuote(taskId)} ${shellQuote(String(trial))} ${command}`;
 }
 
 function benchCommand(
@@ -1627,7 +1627,25 @@ run_trial() {
   fi
 }
 
+queue_trial() {
+  local concurrency="${"${SKILLSCOPE_RUN_CONCURRENCY:-1}"}"
+  if ! [[ "$concurrency" =~ ^[0-9]+$ ]] || [[ "$concurrency" -lt 1 ]]; then
+    concurrency=1
+  fi
+  if [[ "$concurrency" == "1" ]]; then
+    run_trial "$@"
+    return 0
+  fi
+
+  run_trial "$@" &
+  while [[ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$concurrency" ]]; do
+    wait -n || true
+  done
+}
+
 ${lines.join("\n")}
+
+wait || true
 
 failed_count=$(find "$SCRIPT_DIR/status" -name failed -type f 2>/dev/null | wc -l | tr -d ' ')
 done_count=$(find "$SCRIPT_DIR/status" -name done -type f 2>/dev/null | wc -l | tr -d ' ')
