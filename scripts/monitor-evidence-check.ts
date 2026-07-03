@@ -34,6 +34,7 @@ const baseEvidenceFeatures = [
   "job-progress-and-artifact-tail",
   "safe-stop-preview",
   "safe-stop-result",
+  "artifact-readable-label",
   "recent-history",
   "issues-filter",
   "attention-sort",

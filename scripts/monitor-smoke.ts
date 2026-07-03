@@ -73,6 +73,7 @@ const baseEvidenceFeatures = [
   "job-progress-and-artifact-tail",
   "safe-stop-preview",
   "safe-stop-result",
+  "artifact-readable-label",
   "recent-history",
   "issues-filter",
   "attention-sort",
@@ -163,6 +164,8 @@ async function main() {
       assert(copiedPath.result?.value === true, "copy path button should be visible");
       await browser.waitForText("Copied", 15000);
       await captureEvidence(browser, "05a-artifact-copy-action.png", "artifact-copy-actions", "artifact and history paths can be copied from the job detail");
+      await browser.waitForText(path.basename(artifactPath), 15000);
+      await captureEvidence(browser, "05aa-artifact-readable-label.png", "artifact-readable-label", "artifact output headers use readable file names while full paths remain copyable");
     } finally {
       await browser.close();
     }

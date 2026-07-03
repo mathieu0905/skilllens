@@ -4166,7 +4166,7 @@ function JobDetail({
               const tail = artifactTails[artifact.path];
               return (
                 <details key={artifact.path} open={job.artifacts.length === 1}>
-                  <summary>{artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {artifact.path}</summary>
+                  <summary>{artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {pathFileName(artifact.path)}</summary>
                   <JobPathAction label="Artifact path" value={artifact.path} copied={copiedValue === artifact.path} onCopy={() => void copyValue(artifact.path)} compact />
                   <pre>{tail?.content ? truncate(tail.content, 9000) : tail?.error ?? "Waiting for content..."}</pre>
                 </details>
@@ -5444,6 +5444,11 @@ function formatJobRuntime(startedAt: string, lastUpdatedAt: string): string {
 
 function formatJobRuntimeForJob(job: AgentJob): string {
   return formatJobRuntime(job.startedAt, jobRuntimeEndAt(job));
+}
+
+function pathFileName(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/\/+$/g, "");
+  return normalized.split("/").pop() || value;
 }
 
 function detectProcessArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {
