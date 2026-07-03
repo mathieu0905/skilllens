@@ -30,11 +30,12 @@ const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const workDir = path.join(root, ".skilllens", "monitor-smoke", runId);
 const artifactPath = path.join(workDir, "fake-codex-output.log");
 const screenshotDir = path.join(root, ".skilllens", "monitor-smoke-screenshots");
+const runScreenshotDir = path.join(screenshotDir, runId);
 
 async function main() {
   await assertServer();
   await mkdir(path.join(workDir, "bin"), { recursive: true });
-  await mkdir(screenshotDir, { recursive: true });
+  await mkdir(runScreenshotDir, { recursive: true });
 
   const fakeCodexPath = await writeFakeCodex();
   const child = spawn(fakeCodexPath, [artifactPath], {
@@ -53,6 +54,7 @@ async function main() {
 
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
+      await browser.screenshot(path.join(runScreenshotDir, "01-monitor-page-loaded.png"));
       await browser.waitForText("fake-codex-output.log", 30000);
       await browser.evaluate(`
         (() => {
@@ -65,7 +67,21 @@ async function main() {
           return 'ok';
         })()
       `);
-      await browser.screenshot(path.join(screenshotDir, "01-monitor-detects-agent-artifact.png"));
+      await browser.screenshot(path.join(runScreenshotDir, "02-agent-process-detected.png"));
+
+      await browser.evaluate(`
+        (() => {
+          const group = [...document.querySelectorAll('.agent-process-group')]
+            .find((node) => (node.textContent || '').includes('fake-codex-output.log'));
+          const button = group?.querySelector('.process-row button.danger');
+          if (button instanceof HTMLElement) {
+            button.scrollIntoView({ block: 'center' });
+            button.style.outline = '3px solid #b42318';
+          }
+          return Boolean(button);
+        })()
+      `);
+      await browser.screenshot(path.join(runScreenshotDir, "03-agent-stop-button-before-click.png"));
 
       const clicked = await browser.evaluate(`
         (() => {
@@ -80,7 +96,9 @@ async function main() {
       `);
       assert(clicked.result?.value === "clicked-child", `expected only child stop button, got ${clicked.result?.value}`);
       await sleep(1500);
-      await browser.screenshot(path.join(screenshotDir, "02-monitor-after-stop-click.png"));
+      await browser.screenshot(path.join(runScreenshotDir, "04-agent-after-stop-click.png"));
+      await browser.waitForMissingText("fake-codex-output.log", 15000);
+      await browser.screenshot(path.join(runScreenshotDir, "05-agent-process-removed.png"));
     } finally {
       await browser.close();
     }
@@ -93,7 +111,7 @@ async function main() {
 
     console.log("monitor smoke passed");
     console.log(`artifact: ${artifactPath}`);
-    console.log(`screenshots: ${screenshotDir}`);
+    console.log(`screenshots: ${runScreenshotDir}`);
   } finally {
     killProcessGroup(child.pid);
   }
@@ -156,6 +174,7 @@ wait "$child"
     await waitForArtifactTextAt(dockerArtifact, "docker-detached-container", 45000);
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
+      await browser.screenshot(path.join(runScreenshotDir, "06-docker-monitor-page-loaded.png"));
       await browser.waitForText("fake-codex-docker.log", 30000);
       await browser.evaluate(`
         (() => {
@@ -168,7 +187,20 @@ wait "$child"
           return true;
         })()
       `);
-      await browser.screenshot(path.join(screenshotDir, "03-monitor-docker-detached-container.png"));
+      await browser.screenshot(path.join(runScreenshotDir, "07-docker-process-and-artifact-detected.png"));
+      await browser.evaluate(`
+        (() => {
+          const group = [...document.querySelectorAll('.agent-process-group')]
+            .find((node) => (node.textContent || '').includes('fake-codex-docker.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
+          const button = group?.querySelector('.process-row button.danger');
+          if (button instanceof HTMLElement) {
+            button.scrollIntoView({ block: 'center' });
+            button.style.outline = '3px solid #b42318';
+          }
+          return Boolean(button);
+        })()
+      `);
+      await browser.screenshot(path.join(runScreenshotDir, "08-docker-stop-button-before-click.png"));
       const clicked = await browser.evaluate(`
         (() => {
           const group = [...document.querySelectorAll('.agent-process-group')]
@@ -182,7 +214,7 @@ wait "$child"
       `);
       assert(clicked.result?.value === "clicked-child", `frontend should expose only a child stop button for docker agent group, got ${clicked.result?.value}`);
       await sleep(3500);
-      await browser.screenshot(path.join(screenshotDir, "04-monitor-after-docker-stop.png"));
+      await browser.screenshot(path.join(runScreenshotDir, "09-docker-after-stop-click.png"));
     } finally {
       await browser.close();
     }
@@ -190,6 +222,13 @@ wait "$child"
     if (running.trim()) {
       await commandOutput("docker", ["rm", "-f", name]);
       throw new Error("docker container survived frontend stop; monitor needs docker-aware cleanup for detached containers");
+    }
+    const verificationBrowser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+    try {
+      await verificationBrowser.waitForMissingText("fake-codex-docker.log", 15000);
+      await verificationBrowser.screenshot(path.join(runScreenshotDir, "10-docker-process-removed-container-stopped.png"));
+    } finally {
+      await verificationBrowser.close();
     }
     console.log("docker smoke passed");
   } finally {
@@ -363,6 +402,18 @@ class BrowserSession {
       await sleep(700);
     }
     throw new Error(`timed out waiting for frontend text: ${text}`);
+  }
+
+  async waitForMissingText(text: string, timeoutMs: number) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const result = await this.evaluate(`document.body.innerText.includes(${JSON.stringify(text)})`);
+      if (result.result?.value === false) {
+        return;
+      }
+      await sleep(700);
+    }
+    throw new Error(`timed out waiting for frontend text to disappear: ${text}`);
   }
 
   async screenshot(filePath: string) {
