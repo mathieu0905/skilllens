@@ -3658,7 +3658,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         }
         const payload = (await response.json()) as { jobs?: AgentJob[]; updatedAt?: string };
         if (!cancelled) {
-          setJobs(payload.jobs ?? []);
+          setJobs((current) => mergeJobsWithLocalStopResults(payload.jobs ?? [], current));
           setUpdatedAt(payload.updatedAt ?? new Date().toISOString());
           setError("");
         }
@@ -5316,6 +5316,17 @@ function stoppedJobFromResult(job: AgentJob, stopResult: AgentStopResult, stopPl
     stopPlan: stopPlan ?? job.stopPlan,
     lastStopResult: stopResult
   };
+}
+
+function mergeJobsWithLocalStopResults(next: AgentJob[], current: AgentJob[]): AgentJob[] {
+  const nextIds = new Set(next.map((job) => job.id));
+  const preserved = current.filter(
+    (job) =>
+      !nextIds.has(job.id) &&
+      Boolean(job.lastStopResult) &&
+      (job.status === "stopped" || job.status === "failed")
+  );
+  return preserved.length ? [...preserved, ...next] : next;
 }
 
 function compareJobs(left: AgentJob, right: AgentJob, sort: JobSort): number {
