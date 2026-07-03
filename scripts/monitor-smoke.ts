@@ -70,6 +70,7 @@ const baseEvidenceFeatures = [
   "single-stop-action",
   "job-source-context",
   "job-source-command-clamp",
+  "process-tree-detail",
   "job-card-latest-clamp",
   "job-runtime-display",
   "artifact-copy-actions",
@@ -208,6 +209,23 @@ async function main() {
       `);
       assert(commandPreview.result?.value?.ok === true, `command source preview should stay compact and copyable: ${JSON.stringify(commandPreview.result?.value)}`);
       await captureEvidence(browser, "02aba-job-source-command-clamped.png", "job-source-command-clamp", "long source commands are clamped in the detail while the full command remains copyable");
+      const processTreeVisible = await browser.evaluate(`
+        (() => {
+          const details = document.querySelector('.job-technical-details');
+          if (!(details instanceof HTMLDetailsElement)) return { ok: false, reason: 'missing technical details' };
+          details.open = true;
+          const processTree = [...details.querySelectorAll('section')]
+            .find((node) => (node.textContent || '').includes('Process Tree'));
+          processTree?.scrollIntoView({ block: 'center' });
+          const text = processTree?.textContent || '';
+          return {
+            ok: text.includes('Process Tree') && text.includes('pid') && text.includes('protected root'),
+            text
+          };
+        })()
+      `);
+      assert(processTreeVisible.result?.value?.ok === true, `process tree should be visible in technical details: ${JSON.stringify(processTreeVisible.result?.value)}`);
+      await captureEvidence(browser, "02abb-process-tree-detail.png", "process-tree-detail", "job detail exposes the process tree with pid/pgid context and protected-root labeling");
       await browser.waitForText("readable trace update", 15000);
       const latestPreview = await browser.evaluate(`
         (() => {
@@ -252,16 +270,7 @@ async function main() {
       await clickEnabledButton(browser, "Execute stop", 15000);
       await browser.waitForText("Stop result", 45000);
       await captureEvidence(browser, "05-stop-result-visible.png", "safe-stop-result", "stop result shows killed processes, removed containers, residual checks, and cleanup errors");
-      const copiedResult = await browser.evaluate(`
-        (() => {
-          const button = [...document.querySelectorAll('button')]
-            .find((item) => (item.textContent || '').includes('Copy result'));
-          button?.scrollIntoView({ block: 'center' });
-          button?.click();
-          return Boolean(button);
-        })()
-      `);
-      assert(copiedResult.result?.value === true, "copy result button should be visible");
+      await clickEnabledButton(browser, "Copy result", 15000);
       await browser.waitForText("Copied result", 15000);
       await captureEvidence(browser, "05a-stop-result-copy.png", "stop-result-copy", "stop result summary can be copied for reports or follow-up prompts");
       const stoppedFocus = await browser.evaluate(`

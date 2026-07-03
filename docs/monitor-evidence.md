@@ -72,6 +72,7 @@ Current core screenshot-backed features:
 - `single-stop-action`: job detail exposes one safe-stop entry point, not duplicate controls.
 - `job-source-context`: working directory and command are shown before the process tree.
 - `job-source-command-clamp`: long source commands stay compact while remaining copyable.
+- `process-tree-detail`: technical details expose the process tree with pid/pgid context and protected-root labeling.
 - `job-card-latest-clamp`: long latest-output previews stay scannable in job cards.
 - `job-runtime-display`: active and stale jobs show wall-clock runtime.
 - `job-search`: filters by job title, artifact, container, command, or cwd.
@@ -110,5 +111,5 @@ Additional Docker screenshot-backed features:
 
 Expected feature counts:
 
-- Core: 30 screenshots.
-- Docker: 41 screenshots.
+- Core: 31 screenshots.
+- Docker: 42 screenshots.

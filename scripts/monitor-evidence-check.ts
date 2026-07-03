@@ -30,6 +30,7 @@ const baseEvidenceFeatures = [
   "single-stop-action",
   "job-source-context",
   "job-source-command-clamp",
+  "process-tree-detail",
   "job-card-latest-clamp",
   "job-runtime-display",
   "artifact-copy-actions",
