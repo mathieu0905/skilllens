@@ -4229,23 +4229,6 @@ function JobDetail({
           <p className="muted stream-empty">No Docker container attached.</p>
         )}
       </section>
-      <section>
-        <h4>Safe Stop</h4>
-        {job.canStop ? (
-          <div className="job-stop-actions">
-            <button className="secondary-button" onClick={onPreview} disabled={busy}>
-              {busy && !stopPlan ? "Preparing preview..." : "Preview stop safely"}
-            </button>
-            {stopPlan ? (
-              <button className="secondary-button danger" onClick={onStop} disabled={busy || !hasStopTargets}>
-                {busy ? "Stopping..." : "Execute stop"}
-              </button>
-            ) : null}
-          </div>
-        ) : (
-          <p className="muted stream-empty">Root agent is protected; no stoppable child task is available.</p>
-        )}
-      </section>
       <details className="job-technical-details">
         <summary>Technical details</summary>
         <section>

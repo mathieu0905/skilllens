@@ -26,6 +26,7 @@ const baseEvidenceFeatures = [
   "job-list-summary",
   "active-job-card",
   "primary-stop-action",
+  "single-stop-action",
   "job-source-context",
   "job-source-command-clamp",
   "job-card-latest-clamp",

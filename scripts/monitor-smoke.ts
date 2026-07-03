@@ -65,6 +65,7 @@ const baseEvidenceFeatures = [
   "job-list-summary",
   "active-job-card",
   "primary-stop-action",
+  "single-stop-action",
   "job-source-context",
   "job-source-command-clamp",
   "job-card-latest-clamp",
@@ -152,6 +153,16 @@ async function main() {
       `);
       assert(primaryStopVisible.result?.value === true, "primary safe stop action should be visible without scrolling the detail panel");
       await captureEvidence(browser, "02aa-primary-stop-action-visible.png", "primary-stop-action", "safe stop preview is available from the top next-action panel without scrolling");
+      const stopActionCount = await browser.evaluate(`
+        (() => {
+          const detail = document.querySelector('.job-detail');
+          const buttons = [...(detail?.querySelectorAll('button') || [])]
+            .filter((item) => (item.textContent || '').includes('Preview stop safely'));
+          return buttons.length;
+        })()
+      `);
+      assert(stopActionCount.result?.value === 1, `job detail should expose one primary safe stop action, got ${stopActionCount.result?.value}`);
+      await captureEvidence(browser, "02aaa-single-stop-action.png", "single-stop-action", "job detail exposes one clear safe-stop entry point instead of duplicate stop controls");
       await browser.waitForText("WORKING DIRECTORY", 15000);
       await browser.waitForText("COMMAND", 15000);
       await browser.waitForText("Copy cwd", 15000);
