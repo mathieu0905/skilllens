@@ -2891,6 +2891,13 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.job-next-action-controls {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .job-detail section {
   padding: 12px;
   border-top: 1px solid #e3e8ef;

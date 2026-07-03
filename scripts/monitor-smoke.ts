@@ -63,6 +63,7 @@ const baseEvidenceFeatures = [
   "job-room-shell",
   "job-list-summary",
   "active-job-card",
+  "primary-stop-action",
   "job-runtime-display",
   "artifact-copy-actions",
   "artifact-output-copy",
@@ -131,6 +132,17 @@ async function main() {
         })()
       `);
       await captureEvidence(browser, "02-active-job-card-appears.png", "active-job-card", "active job card shows title, status, process/artifact/container counts, and selected detail");
+      const primaryStopVisible = await browser.evaluate(`
+        (() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((item) => (item.textContent || '').includes('Preview stop safely'));
+          if (!button) return false;
+          const rect = button.getBoundingClientRect();
+          return rect.top >= 0 && rect.bottom <= window.innerHeight && rect.left >= 0 && rect.right <= window.innerWidth;
+        })()
+      `);
+      assert(primaryStopVisible.result?.value === true, "primary safe stop action should be visible without scrolling the detail panel");
+      await captureEvidence(browser, "02aa-primary-stop-action-visible.png", "primary-stop-action", "safe stop preview is available from the top next-action panel without scrolling");
       await browser.waitForText("runtime", 15000);
       await captureEvidence(browser, "02a-runtime-display-visible.png", "job-runtime-display", "active and stale jobs show wall-clock runtime instead of last-update age");
       await verifySearchSortAndLiveControls(browser);

@@ -4156,6 +4156,18 @@ function JobDetail({
         <span>Next action</span>
         <strong>{nextAction.title}</strong>
         <p>{nextAction.body}</p>
+        {job.canStop && !stopResult ? (
+          <div className="job-next-action-controls">
+            <button className="secondary-button" onClick={onPreview} disabled={busy}>
+              {busy && !stopPlan ? "Preparing preview..." : stopPlan ? "Refresh preview" : "Preview stop safely"}
+            </button>
+            {stopPlan ? (
+              <button className="secondary-button danger" onClick={onStop} disabled={busy || !hasStopTargets}>
+                {busy ? "Stopping..." : "Execute stop"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <JobProgress progress={progress} />
       <section>
