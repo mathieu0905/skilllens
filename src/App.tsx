@@ -214,6 +214,11 @@ interface AgentProcessEvent {
   tracePath?: string;
   traceSize?: number;
   traceMtime?: string;
+  artifactPaths?: Array<{ label: string; path: string; size?: number; mtime?: string }>;
+  dockerContainers?: string[];
+  managedBySkillScope?: boolean;
+  canStop?: boolean;
+  canStopGroup?: boolean;
   error?: string;
 }
 
@@ -620,7 +625,9 @@ function statusLabel(status: CoverageStatus, locale: Locale): string {
 }
 
 function viewLabelsFor(locale: Locale): Array<{ id: View; label: string; icon: typeof FileText }> {
-  return (Object.keys(viewIcons) as View[]).map((id) => ({ id, label: ui(locale).views[id], icon: viewIcons[id] }));
+  return (Object.keys(viewIcons) as View[])
+    .filter((id) => id !== "monitor")
+    .map((id) => ({ id, label: ui(locale).views[id], icon: viewIcons[id] }));
 }
 
 function initialViewFromUrl(): View {
@@ -1194,7 +1201,7 @@ function App() {
       const response = await fetch("/api/agent-processes/kill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: processEvent.id, pid: processEvent.pid, signal: "SIGTERM" })
+        body: JSON.stringify({ id: processEvent.id, pid: processEvent.pid, pgid: processEvent.pgid, signal: "SIGTERM" })
       });
       if (!response.ok) {
         const error = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -1288,6 +1295,17 @@ function App() {
           <span className="adapter-pill">Claude Code</span>
           <span className="adapter-pill">ACP JSONL</span>
           <button
+            className={view === "monitor" && !isHome ? "secondary-button compact active" : "secondary-button compact"}
+            onClick={() => {
+              setView("monitor");
+              setIsHome(false);
+              window.history.replaceState(null, "", `${window.location.pathname}?view=monitor`);
+            }}
+          >
+            <Activity size={16} />
+            {t.views.monitor}
+          </button>
+          <button
             className="secondary-button compact"
             onClick={() => setLocale((current) => (current === "zh" ? "en" : "zh"))}
             title="Language"
@@ -1330,6 +1348,15 @@ function App() {
           />
         ) : openingSkillUse ? (
           <OpeningPanel skillUse={openingSkillUse} />
+        ) : view === "monitor" ? (
+          <MonitorPage
+            onBack={() => {
+              setIsHome(true);
+              setView("coverage");
+              window.history.replaceState(null, "", window.location.pathname);
+            }}
+            onKillProcess={killAgentProcess}
+          />
         ) : (
         <section className="analysis-panel">
           <div className="analysis-topbar">
@@ -1346,24 +1373,18 @@ function App() {
             </button>
             <div className="analysis-title-block">
               <span>{t.app.currentWindow}</span>
-              <h2>{view === "monitor" ? t.views.monitor : analysisDisplayTitle(focusedProject)}</h2>
-              <p>
-                {view === "monitor"
-                  ? locale === "zh"
-                    ? "同一个 SkillScope 服务中的第二个功能：监控本机 agent / 批处理 / docker 相关进程。"
-                    : "Second function in the same SkillScope service: monitor local agent / batch / docker-related processes."
-                  : `${currentSkillTitle(focusedProject)} · ${String(project.result.source ?? project.sourceType)} · ${formatResult(project.result.success)}`}
-              </p>
+              <h2>{analysisDisplayTitle(focusedProject)}</h2>
+              <p>{currentSkillTitle(focusedProject)} · {String(project.result.source ?? project.sourceType)} · {formatResult(project.result.success)}</p>
             </div>
             <div className="analysis-actions">
-              {view !== "monitor" ? <button className="secondary-button" onClick={() => startAgentAnalysis(false)} disabled={isAgentAnalyzing}>
+              <button className="secondary-button" onClick={() => startAgentAnalysis(false)} disabled={isAgentAnalyzing}>
                 <Code2 size={16} />
                 {isAgentAnalyzing ? t.app.analyzing : t.app.startAnalysis}
-              </button> : null}
-              {view !== "monitor" ? <button className="secondary-button" onClick={() => startAgentAnalysis(true)} disabled={isAgentAnalyzing}>
+              </button>
+              <button className="secondary-button" onClick={() => startAgentAnalysis(true)} disabled={isAgentAnalyzing}>
                 <RefreshCw size={16} />
                 {t.app.reanalyze}
-              </button> : null}
+              </button>
               <details className="import-drawer">
                 <summary>
                   <Upload size={16} />
@@ -1408,7 +1429,7 @@ function App() {
             </div>
           </div>
 
-          {view !== "monitor" ? <div className="analysis-subbar">
+          <div className="analysis-subbar">
             <span>{focusedProject.traceFormat.replace("_", " ")}</span>
             <span>
               {focusedProject.events.length} / {project.events.length} events
@@ -1429,7 +1450,7 @@ function App() {
                 <span className="needs-judge">{t.app.needsJudge}</span>
               </>
             )}
-          </div> : null}
+          </div>
           {agentAnalysisError ? <p className="error-text analysis-message">{agentAnalysisError}</p> : null}
           {agentAnalysisMessage ? (
             <div className="analysis-message analysis-message-row">
@@ -1557,8 +1578,6 @@ function App() {
             />
           ) : null}
 
-          {view === "monitor" ? <SystemMonitorView onKillProcess={killAgentProcess} /> : null}
-
           {view === "rewrite" ? <RewriteView project={focusedProject} audit={analysisAudit} /> : null}
 
           {view === "report" ? <ReportView project={focusedProject} /> : null}
@@ -1634,6 +1653,33 @@ function SessionHome({
           <button className="secondary-button" onClick={onOpenDemo}>
             {t.home.demo}
           </button>
+        </div>
+      </div>
+
+      <div className="home-mode-grid">
+        <button className="home-mode-card monitor" onClick={onOpenMonitor}>
+          <span>
+            <Activity size={19} />
+            {locale === "zh" ? "Agent 进程监控" : "Agent Process Monitor"}
+          </span>
+          <strong>{locale === "zh" ? "查看正在运行的 agent" : "Watch running agents"}</strong>
+          <small>
+            {locale === "zh"
+              ? "按 Codex / Claude 分组，监控它们启动的子进程、trace 和输出文件。"
+              : "Grouped by Codex / Claude, with child processes, traces, and output artifacts."}
+          </small>
+        </button>
+        <div className="home-mode-card passive">
+          <span>
+            <FileText size={19} />
+            {locale === "zh" ? "Skill 使用分析" : "Skill Use Analysis"}
+          </span>
+          <strong>{locale === "zh" ? "从下面选择一次 skill 使用" : "Choose a skill use below"}</strong>
+          <small>
+            {locale === "zh"
+              ? "打开 Skill 高亮、Skill 图、轨迹、分析过程和优化建议。"
+              : "Open highlights, graph, trace, analysis process, and optimization suggestions."}
+          </small>
         </div>
       </div>
 
@@ -3087,13 +3133,54 @@ function AnalysisProcessView({
   );
 }
 
+function MonitorPage({
+  onBack,
+  onKillProcess
+}: {
+  onBack: () => void;
+  onKillProcess: (processEvent: AgentProcessEvent) => void;
+}) {
+  const locale = useLocale();
+  const t = ui(locale);
+  return (
+    <section className="monitor-page">
+      <div className="analysis-topbar monitor-page-topbar">
+        <button className="secondary-button" onClick={onBack}>
+          <ArrowLeft size={16} />
+          {t.app.back}
+        </button>
+        <div className="analysis-title-block">
+          <span>{locale === "zh" ? "Agent 进程可视化管理" : "Agent Process Monitor"}</span>
+          <h2>{t.views.monitor}</h2>
+          <p>
+            {locale === "zh"
+              ? "独立于 Skill 优化页面，用来查看 agent 启动的进程树、trace、日志产物，并支持停止单个进程或整组任务。"
+              : "Separate from the skill optimization page. Inspect agent process trees, traces, artifacts, and stop one process or a whole group."}
+          </p>
+        </div>
+      </div>
+      <SystemMonitorView onKillProcess={onKillProcess} />
+    </section>
+  );
+}
+
 function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: AgentProcessEvent) => void }) {
   const locale = useLocale();
   const [processes, setProcesses] = useState<AgentProcessEvent[]>([]);
   const [updatedAt, setUpdatedAt] = useState("");
   const [error, setError] = useState("");
-  const activeProcesses = processes.filter((processEvent) => processEvent.status === "running" || processEvent.status === "started");
+  const [artifactTails, setArtifactTails] = useState<Record<string, TraceTailState>>({});
   const groupedProcesses = useMemo(() => groupProcessesByAgent(processes), [processes]);
+  const activeProcesses = groupedProcesses.flatMap((group) => group.processes).filter((processEvent) => processEvent.status === "running" || processEvent.status === "started");
+  const artifactTailsRef = useRef(artifactTails);
+  const artifactPathsKey = useMemo(() => {
+    const paths = processes.flatMap((processEvent) => processArtifactPaths(processEvent).map((artifact) => artifact.path));
+    return Array.from(new Set(paths)).sort().join("\n");
+  }, [processes]);
+
+  useEffect(() => {
+    artifactTailsRef.current = artifactTails;
+  }, [artifactTails]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3123,6 +3210,62 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
     };
   }, []);
 
+  useEffect(() => {
+    const paths = artifactPathsKey.split("\n").filter(Boolean);
+    if (!paths.length) {
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      await Promise.all(
+        paths.map(async (artifactPath) => {
+          const current = artifactTailsRef.current[artifactPath];
+          try {
+            const response = await fetch(
+              `/api/agent-processes/trace?path=${encodeURIComponent(artifactPath)}&offset=${current?.nextOffset ?? 0}&maxBytes=24000`
+            );
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const payload = (await response.json()) as Omit<TraceTailState, "updatedAt">;
+            if (!cancelled) {
+              setArtifactTails((existing) => ({
+                ...existing,
+                [artifactPath]: {
+                  ...payload,
+                  updatedAt: new Date().toISOString(),
+                  content: `${existing[artifactPath]?.content ?? ""}${payload.content}`.slice(-70000)
+                }
+              }));
+            }
+          } catch (tailError) {
+            if (!cancelled) {
+              setArtifactTails((existing) => ({
+                ...existing,
+                [artifactPath]: {
+                  path: artifactPath,
+                  offset: existing[artifactPath]?.offset ?? 0,
+                  nextOffset: existing[artifactPath]?.nextOffset ?? 0,
+                  size: existing[artifactPath]?.size ?? 0,
+                  mtime: existing[artifactPath]?.mtime ?? "",
+                  content: existing[artifactPath]?.content ?? "",
+                  updatedAt: new Date().toISOString(),
+                  error: tailError instanceof Error ? tailError.message : "Failed to read artifact."
+                }
+              }));
+            }
+          }
+        })
+      );
+    };
+    void load();
+    const timer = window.setInterval(load, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [artifactPathsKey]);
+
   return (
     <div className="analysis-process-view monitor-only">
       <div className="analysis-process-main">
@@ -3131,8 +3274,8 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
             <h3>{locale === "zh" ? "进程监控" : "Process Monitor"}</h3>
             <p>
               {locale === "zh"
-                ? "同一个 SkillScope 服务里观察 Codex / Claude / docker / 批处理进程，并可随时停止。"
-                : "Watch Codex / Claude / docker / batch processes in this SkillScope service and stop them when needed."}
+                ? "只展示正在运行的 Codex / Claude agent，以及这些 agent 启动的子进程、trace 和输出产物。"
+                : "Shows running Codex / Claude agents and the child processes, traces, and artifacts they started."}
             </p>
           </div>
           <span className="process-status running">{activeProcesses.length} active</span>
@@ -3140,7 +3283,7 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
         {error ? <p className="error-text process-message">{error}</p> : null}
         <div className="monitor-panel process-monitor-panel">
           <div className="stream-head">
-            <strong>{locale === "zh" ? "本机长程任务" : "Local Long-Running Tasks"}</strong>
+            <strong>{locale === "zh" ? "正在运行的 Agent" : "Running Agents"}</strong>
             <span>{updatedAt ? formatShortTime(updatedAt) : ""}</span>
           </div>
           {groupedProcesses.length ? (
@@ -3152,7 +3295,7 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
                       <strong>{group.label}</strong>
                       <span>{group.processes.length} processes · {group.activeCount} active</span>
                     </div>
-                    {group.root ? (
+                    {group.root?.canStopGroup ? (
                       <button className="secondary-button danger" onClick={() => onKillProcess(group.root!)}>
                         {locale === "zh" ? "停止整组" : "Stop Group"}
                       </button>
@@ -3171,12 +3314,32 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
                           {processEvent.association ?? "unlinked"}
                           {processEvent.agentRootLabel ? ` · ${processEvent.agentRootLabel}` : ""}
                         </small>
+                        {processEvent.dockerContainers?.length ? (
+                          <small>docker {processEvent.dockerContainers.join(", ")}</small>
+                        ) : null}
                         {processEvent.tracePath ? <small>trace {formatBytes(processEvent.traceSize ?? 0)} · {processEvent.tracePath}</small> : null}
+                        {processArtifactPaths(processEvent).length ? (
+                          <div className="process-artifacts">
+                            {processArtifactPaths(processEvent).map((artifact) => {
+                              const tail = artifactTails[artifact.path];
+                              return (
+                                <details key={artifact.path}>
+                                  <summary>
+                                    {artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {artifact.path}
+                                  </summary>
+                                  <pre>{tail?.content ? truncate(tail.content, 8000) : tail?.error ?? (locale === "zh" ? "等待内容..." : "Waiting for content...")}</pre>
+                                </details>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                       </div>
-                      {["started", "running"].includes(processEvent.status) ? (
+                      {["started", "running"].includes(processEvent.status) && processEvent.canStop ? (
                         <button className="secondary-button danger" onClick={() => onKillProcess(processEvent)}>
                           {locale === "zh" ? "停止" : "Stop"}
                         </button>
+                      ) : ["started", "running"].includes(processEvent.status) ? (
+                        <span>{locale === "zh" ? "受保护" : "protected"}</span>
                       ) : (
                         <span>{processEvent.status}</span>
                       )}
@@ -3186,20 +3349,24 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
               ))}
             </div>
           ) : (
-            <p className="muted stream-empty">{locale === "zh" ? "没有发现需要监控的进程。" : "No monitorable process found."}</p>
+            <p className="muted stream-empty">{locale === "zh" ? "没有发现正在运行的 Codex / Claude agent。" : "No running Codex / Claude agent found."}</p>
           )}
         </div>
       </div>
       <aside className="analysis-process-side">
-        <div className="column-title">{locale === "zh" ? "断点恢复约定" : "Resume Contract"}</div>
+        <div className="column-title">{locale === "zh" ? "监控范围" : "Scope"}</div>
         <div className="path-list">
           <div className="path-row">
-            <strong>{locale === "zh" ? "当前实现" : "Current support"}</strong>
-            <code>{locale === "zh" ? "kill + trace tail + artifact/cache resume base" : "kill + trace tail + artifact/cache resume base"}</code>
+            <strong>{locale === "zh" ? "Agent" : "Agents"}</strong>
+            <code>{locale === "zh" ? "Codex / Claude 主进程" : "Codex / Claude root processes"}</code>
           </div>
           <div className="path-row">
-            <strong>{locale === "zh" ? "批处理建议" : "Batch jobs"}</strong>
-            <code>{locale === "zh" ? "写 checkpoint.json: completed, failed, nextIndex, resumeCommand" : "write checkpoint.json: completed, failed, nextIndex, resumeCommand"}</code>
+            <strong>{locale === "zh" ? "子进程" : "Children"}</strong>
+            <code>{locale === "zh" ? "仅显示由这些 agent 拉起的 bash / python / docker / npm / bench 等任务" : "Only bash / python / docker / npm / bench tasks started by those agents"}</code>
+          </div>
+          <div className="path-row">
+            <strong>{locale === "zh" ? "实时产物" : "Live artifacts"}</strong>
+            <code>{locale === "zh" ? "Codex trace、--out/-o 输出、*.log/*.jsonl/*.txt 等文件 tail" : "Codex traces, --out/-o outputs, and *.log/*.jsonl/*.txt tails"}</code>
           </div>
         </div>
       </aside>
@@ -3737,7 +3904,10 @@ function groupProcessesByAgent(processes: AgentProcessEvent[]): Array<{
 }> {
   const groups = new Map<string, AgentProcessEvent[]>();
   for (const processEvent of processes) {
-    const key = processEvent.agentRootPid ? `agent-${processEvent.agentRootPid}` : `unlinked-${processEvent.pgid ?? processEvent.pid ?? processEvent.id}`;
+    if (!processEvent.agentRootPid || processEvent.agentRootCommand === "unknown") {
+      continue;
+    }
+    const key = `agent-${processEvent.agentRootPid}`;
     const current = groups.get(key) ?? [];
     current.push(processEvent);
     groups.set(key, current);
@@ -3756,6 +3926,52 @@ function groupProcessesByAgent(processes: AgentProcessEvent[]): Array<{
       activeCount: groupProcesses.filter((processEvent) => processEvent.status === "running" || processEvent.status === "started").length
     };
   });
+}
+
+function processArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {
+  const artifacts = [
+    ...(processEvent.tracePath
+      ? [{ label: "trace", path: processEvent.tracePath, size: processEvent.traceSize, mtime: processEvent.traceMtime }]
+      : []),
+    ...(processEvent.artifactPaths ?? []),
+    ...detectProcessArtifactPaths(processEvent)
+  ];
+  const seen = new Set<string>();
+  return artifacts.filter((artifact) => {
+    if (!artifact.path || seen.has(artifact.path)) {
+      return false;
+    }
+    seen.add(artifact.path);
+    return true;
+  });
+}
+
+function detectProcessArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {
+  const artifacts: Array<{ label: string; path: string }> = [];
+  const args = processEvent.args ?? [];
+  const add = (label: string, value: string | undefined) => {
+    if (!value || value.startsWith("-")) {
+      return;
+    }
+    const cleaned = value.replace(/^["']|["']$/g, "").replace(/[;,)]$/g, "");
+    if (/\.(?:log|jsonl|json|txt|out|err|md)$/i.test(cleaned)) {
+      artifacts.push({ label, path: cleaned });
+    }
+  };
+  args.forEach((arg, index) => {
+    if (/^(--out|--output|--output-last-message|--log|--log-file|--report|--report-out|-o)$/i.test(arg)) {
+      add(arg.replace(/^-+/, ""), args[index + 1]);
+    }
+    const inline = arg.match(/^(--out|--output|--output-last-message|--log|--log-file|--report|--report-out)=([^ ]+)$/i);
+    if (inline) {
+      add(inline[1].replace(/^-+/, ""), inline[2]);
+    }
+    if (arg === ">" || arg === ">>") {
+      add("redirect", args[index + 1]);
+    }
+    add("file", arg);
+  });
+  return artifacts;
 }
 
 function hasDisplayableAgentContent(event: AgentLiveEvent): boolean {

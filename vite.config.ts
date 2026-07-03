@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readlinkSync, statSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -204,6 +204,11 @@ interface AgentProcessEvent {
   tracePath?: string;
   traceSize?: number;
   traceMtime?: string;
+  artifactPaths?: Array<{ label: string; path: string; size?: number; mtime?: string }>;
+  dockerContainers?: string[];
+  managedBySkillScope?: boolean;
+  canStop?: boolean;
+  canStopGroup?: boolean;
   error?: string;
 }
 
@@ -221,6 +226,7 @@ interface ProcessSnapshot {
   argsText: string;
   argv: string[];
   command: string;
+  cwd?: string;
 }
 
 const LOCAL_TRACE_SCAN_LIMIT = Number.parseInt(process.env.SKILLLENS_LOCAL_TRACE_LIMIT ?? "1600", 10);
@@ -386,8 +392,8 @@ function skillLensCaptureApi() {
         }
         if (url === "/api/agent-processes/kill" && req.method === "POST") {
           try {
-            const body = JSON.parse(await readBody(req)) as { id?: string; pid?: number; signal?: NodeJS.Signals };
-            const result = killAgentProcess(body.id, body.pid, body.signal ?? "SIGTERM");
+            const body = JSON.parse(await readBody(req)) as { id?: string; pid?: number; pgid?: number; signal?: NodeJS.Signals };
+            const result = await killAgentProcess(body.id, body.pid, body.pgid, body.signal ?? "SIGTERM");
             await sendJson(res, result);
           } catch (error) {
             sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to kill process" });
@@ -2900,17 +2906,39 @@ async function findRecentAgentTrace(command: string, cwd: string, startedAfterMs
   return files[0]?.path;
 }
 
-function killAgentProcess(id: string | undefined, pid: number | undefined, signal: NodeJS.Signals) {
+async function killAgentProcess(id: string | undefined, pid: number | undefined, pgid: number | undefined, signal: NodeJS.Signals) {
   const active = id ? activeAgentProcesses.get(id) : Array.from(activeAgentProcesses.values()).find((item) => item.event.pid === pid);
   if (!active && !pid) {
     throw new Error("process is not active");
   }
-  const targetPid = active?.event.pgid ?? active?.event.pid ?? pid;
+  const externalSnapshot = active ? undefined : await findProcessSnapshot(pid);
+  const externalRoot = externalSnapshot ? findAgentRoot(externalSnapshot.snapshot, externalSnapshot.byPid) : null;
+  if (!active && externalSnapshot && externalRoot) {
+    const rootPid = externalRoot.snapshot.pid;
+    const requestedGroup = externalSnapshot.snapshot.pgid;
+    if (
+      externalSnapshot.snapshot.pid === rootPid ||
+      requestedGroup === rootPid ||
+      isAgentRoot(externalSnapshot.snapshot)
+    ) {
+      throw new Error("refusing to stop an external Codex/Claude root process group");
+    }
+  }
+  const targetPid = active?.event.pgid ?? externalSnapshot?.snapshot.pgid ?? pgid ?? active?.event.pid ?? pid;
   if (!targetPid) {
     throw new Error("process has no pid");
   }
-  const killTarget = process.platform !== "win32" && active?.event.pgid ? -targetPid : targetPid;
-  process.kill(killTarget, signal);
+  const dockerContainers = await findDockerContainersForProcess(active?.event.pid ?? pid, active?.event.pgid ?? externalSnapshot?.snapshot.pgid ?? pgid);
+  const shouldKillGroup = process.platform !== "win32" && Boolean(active?.event.pgid ?? externalSnapshot?.snapshot.pgid ?? pgid);
+  const killTarget = shouldKillGroup ? -targetPid : targetPid;
+  try {
+    process.kill(killTarget, signal);
+  } catch (error) {
+    if (!dockerContainers.length) {
+      throw error;
+    }
+  }
+  const stoppedDockerContainers = await stopDockerContainers(dockerContainers);
   if (!active) {
     return {
       id: String(pid),
@@ -2921,7 +2949,11 @@ function killAgentProcess(id: string | undefined, pid: number | undefined, signa
       status: "killed",
       startedAt: new Date().toISOString(),
       endedAt: new Date().toISOString(),
-      signal
+      signal,
+      dockerContainers: stoppedDockerContainers,
+      managedBySkillScope: false,
+      canStop: false,
+      canStopGroup: false
     } satisfies AgentProcessEvent;
   }
   active.event = {
@@ -2929,6 +2961,7 @@ function killAgentProcess(id: string | undefined, pid: number | undefined, signa
     status: "killed",
     endedAt: new Date().toISOString(),
     signal,
+    dockerContainers: uniqueStrings([...(active.event.dockerContainers ?? []), ...stoppedDockerContainers]),
     ...traceStatFields(active.event.tracePath)
   };
   activeAgentProcesses.set(active.event.id, active);
@@ -2936,10 +2969,13 @@ function killAgentProcess(id: string | undefined, pid: number | undefined, signa
 }
 
 async function listAgentProcesses(): Promise<{ processes: AgentProcessEvent[]; updatedAt: string }> {
-  const active = Array.from(activeAgentProcesses.values()).map((item) => ({
-    ...item.event,
-    ...traceStatFields(item.event.tracePath)
-  }));
+  const active = Array.from(activeAgentProcesses.values()).map((item) =>
+    withStopCapabilities({
+      ...item.event,
+      managedBySkillScope: true,
+      ...traceStatFields(item.event.tracePath)
+    })
+  );
   if (process.platform === "win32") {
     return { processes: active, updatedAt: new Date().toISOString() };
   }
@@ -2949,10 +2985,16 @@ async function listAgentProcesses(): Promise<{ processes: AgentProcessEvent[]; u
     .map(parseProcessSnapshot)
     .filter((snapshot): snapshot is ProcessSnapshot => Boolean(snapshot));
   const byPid = new Map(snapshots.map((snapshot) => [snapshot.pid, snapshot]));
-  const external = snapshots
-    .filter(isMonitorableProcess)
-    .map((snapshot) => snapshotToAgentProcess(snapshot, byPid))
-    .filter((processEvent) => !active.some((item) => item.pid === processEvent.pid));
+  const external = (
+    await Promise.all(
+      snapshots
+        .filter(isMonitorableProcess)
+        .map((snapshot) => snapshotToAgentProcess(snapshot, byPid))
+        .map((item) => enrichAgentProcessArtifacts(item.processEvent, item.snapshot))
+    )
+  )
+    .filter((processEvent) => processEvent.agentRootPid && !active.some((item) => item.pid === processEvent.pid))
+    .map((processEvent) => withStopCapabilities(processEvent));
   return {
     processes: [...active, ...external].sort((left, right) => (left.startedAt < right.startedAt ? 1 : -1)),
     updatedAt: new Date().toISOString()
@@ -2975,12 +3017,27 @@ function parseProcessSnapshot(row: string): ProcessSnapshot | null {
     elapsed,
     argsText,
     argv,
-    command
+    command,
+    cwd: readProcessCwd(Number(pidText))
   };
 }
 
+async function findProcessSnapshot(pid: number | undefined): Promise<{ snapshot: ProcessSnapshot; byPid: Map<number, ProcessSnapshot> } | null> {
+  if (!pid || process.platform === "win32") {
+    return null;
+  }
+  const rows = await execFileText("ps", ["-eo", "pid=,ppid=,pgid=,stat=,etime=,args="]);
+  const snapshots = rows
+    .split(/\r?\n/)
+    .map(parseProcessSnapshot)
+    .filter((snapshot): snapshot is ProcessSnapshot => Boolean(snapshot));
+  const byPid = new Map(snapshots.map((snapshot) => [snapshot.pid, snapshot]));
+  const snapshot = byPid.get(pid);
+  return snapshot ? { snapshot, byPid } : null;
+}
+
 function isMonitorableProcess(snapshot: ProcessSnapshot): boolean {
-  if (!/\b(codex|claude|bench|docker|pytest|vitest|npm|pnpm|yarn|python|node|uv)\b/i.test(snapshot.argsText)) {
+  if (!/\b(codex|claude|bench|docker|pytest|vitest|npm|pnpm|yarn|python|node|uv|bash|sh)\b/i.test(snapshot.argsText)) {
     return false;
   }
   if (/SkillScope\/node_modules\/\.bin\/vite|rg agent-processes|ps -eo|cpuUsage\.sh/i.test(snapshot.argsText)) {
@@ -2989,13 +3046,16 @@ function isMonitorableProcess(snapshot: ProcessSnapshot): boolean {
   return true;
 }
 
-function snapshotToAgentProcess(snapshot: ProcessSnapshot, byPid: Map<number, ProcessSnapshot>): AgentProcessEvent {
+function snapshotToAgentProcess(
+  snapshot: ProcessSnapshot,
+  byPid: Map<number, ProcessSnapshot>
+): { processEvent: AgentProcessEvent; snapshot: ProcessSnapshot } {
   const root = findAgentRoot(snapshot, byPid);
-  return {
+  const processEvent: AgentProcessEvent = {
     id: `external-${snapshot.pid}`,
     command: snapshot.command,
     args: snapshot.argv.slice(1),
-    cwd: "",
+    cwd: snapshot.cwd ?? "",
     pid: snapshot.pid,
     ppid: snapshot.ppid,
     pgid: snapshot.pgid,
@@ -3006,7 +3066,32 @@ function snapshotToAgentProcess(snapshot: ProcessSnapshot, byPid: Map<number, Pr
     status: snapshot.stat.includes("Z") ? "failed" : "running",
     startedAt: elapsedToStartedAt(snapshot.elapsed),
     outputPath: undefined,
-    promptPath: undefined
+    promptPath: undefined,
+    artifactPaths: detectArtifactPaths(snapshot),
+    dockerContainers: detectDockerContainers(snapshot.argsText),
+    managedBySkillScope: false
+  };
+  return { processEvent, snapshot };
+}
+
+function withStopCapabilities(processEvent: AgentProcessEvent): AgentProcessEvent {
+  const running = processEvent.status === "running" || processEvent.status === "started";
+  if (!running) {
+    return { ...processEvent, canStop: false, canStopGroup: false };
+  }
+  if (processEvent.managedBySkillScope) {
+    return { ...processEvent, canStop: true, canStopGroup: true };
+  }
+  const externalAgentGroup =
+    Boolean(processEvent.agentRootPid) &&
+    (processEvent.pid === processEvent.agentRootPid ||
+      processEvent.pgid === processEvent.agentRootPid ||
+      processEvent.association === "self" ||
+      processEvent.association === "process_group");
+  return {
+    ...processEvent,
+    canStop: !externalAgentGroup,
+    canStopGroup: false
   };
 }
 
@@ -3014,38 +3099,246 @@ function findAgentRoot(
   snapshot: ProcessSnapshot,
   byPid: Map<number, ProcessSnapshot>
 ): { snapshot: ProcessSnapshot; kind: "codex" | "claude"; association: "ancestor" | "process_group" | "self" } | null {
-  if (isAgentRoot(snapshot)) {
-    return { snapshot, kind: agentKind(snapshot), association: "self" };
+  const groupRoot = bestProcessGroupAgentRoot(
+    Array.from(byPid.values()).filter((candidate) => candidate.pgid === snapshot.pgid && candidate.pid !== snapshot.pid && isAgentRoot(candidate))
+  );
+  if (groupRoot) {
+    return { snapshot: promoteAgentRoot(groupRoot, byPid), kind: agentKind(groupRoot), association: "process_group" };
   }
+
   const seen = new Set<number>();
+  if (isAgentRoot(snapshot)) {
+    const promoted = promoteAgentRoot(snapshot, byPid);
+    return { snapshot: promoted, kind: agentKind(promoted), association: promoted.pid === snapshot.pid ? "self" : "ancestor" };
+  }
   let current: ProcessSnapshot | undefined = snapshot;
-  while (current && current.ppid && !seen.has(current.ppid)) {
+  while (current?.ppid && !seen.has(current.ppid)) {
     seen.add(current.pid);
     const parent = byPid.get(current.ppid);
     if (!parent) {
       break;
     }
     if (isAgentRoot(parent)) {
-      return { snapshot: parent, kind: agentKind(parent), association: "ancestor" };
+      const promoted = promoteAgentRoot(parent, byPid);
+      return { snapshot: promoted, kind: agentKind(promoted), association: "ancestor" };
     }
     current = parent;
   }
-  const groupRoot = Array.from(byPid.values()).find(
-    (candidate) => candidate.pgid === snapshot.pgid && candidate.pid !== snapshot.pid && isAgentRoot(candidate)
-  );
-  return groupRoot ? { snapshot: groupRoot, kind: agentKind(groupRoot), association: "process_group" } : null;
+  return null;
+}
+
+function bestAgentRoot(candidates: ProcessSnapshot[]): ProcessSnapshot | null {
+  return candidates.find((candidate) => /(^|\/)(node|nodejs)$/i.test(candidate.argv[0] ?? "")) ?? candidates[0] ?? null;
+}
+
+function bestProcessGroupAgentRoot(candidates: ProcessSnapshot[]): ProcessSnapshot | null {
+  if (!candidates.length) {
+    return null;
+  }
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+  if (candidates.length === 2 && (candidates[0].ppid === candidates[1].pid || candidates[1].ppid === candidates[0].pid)) {
+    return bestAgentRoot(candidates);
+  }
+  return null;
+}
+
+function promoteAgentRoot(snapshot: ProcessSnapshot, byPid: Map<number, ProcessSnapshot>): ProcessSnapshot {
+  const parent = byPid.get(snapshot.ppid);
+  return parent && isAgentRoot(parent) ? parent : snapshot;
 }
 
 function isAgentRoot(snapshot: ProcessSnapshot): boolean {
-  return /\b(codex|claude)\b/i.test(snapshot.argsText) && !/skillscope.*analyzer/i.test(snapshot.argsText);
+  if (/skillscope.*analyzer/i.test(snapshot.argsText)) {
+    return false;
+  }
+  if (/^(codex|claude)$/i.test(snapshot.command)) {
+    return true;
+  }
+  const first = snapshot.argv[0] ?? "";
+  const second = snapshot.argv[1] ?? "";
+  return /(^|\/)(node|nodejs|bash|sh)$/i.test(first) && /(^|\/)(codex|claude)$/.test(second);
 }
 
 function agentKind(snapshot: ProcessSnapshot): "codex" | "claude" {
   return /\bclaude\b/i.test(snapshot.argsText) ? "claude" : "codex";
 }
 
+async function enrichAgentProcessArtifacts(processEvent: AgentProcessEvent, snapshot: ProcessSnapshot): Promise<AgentProcessEvent> {
+  const tracePath =
+    processEvent.tracePath ??
+    (processEvent.agentRootCommand === "codex" || /\bcodex\b/i.test(snapshot.argsText)
+      ? await findCodexTraceForProcess(snapshot, processEvent.startedAt)
+      : undefined);
+  const artifactPaths = uniqueArtifacts([
+    ...(processEvent.artifactPaths ?? []),
+    ...(tracePath ? [{ label: "codex trace", path: tracePath }] : [])
+  ]).map((artifact) => ({ ...artifact, ...artifactStatFields(artifact.path) }));
+  return {
+    ...processEvent,
+    tracePath,
+    ...(tracePath ? traceStatFields(tracePath) : {}),
+    artifactPaths
+  };
+}
+
+async function findCodexTraceForProcess(snapshot: ProcessSnapshot, startedAt: string): Promise<string | undefined> {
+  const codexHome = process.env.CODEX_HOME || path.join(homeDir(), ".codex");
+  const sessionsRoot = path.join(codexHome, "sessions");
+  if (!existsSync(sessionsRoot)) {
+    return undefined;
+  }
+  const sessionIds = Array.from(snapshot.argsText.matchAll(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi)).map(
+    (match) => match[0]
+  );
+  if (!sessionIds.length) {
+    return undefined;
+  }
+  const startedMs = Date.parse(startedAt);
+  const files = (await listJsonlFiles(sessionsRoot))
+    .filter((file) => !Number.isFinite(startedMs) || file.mtimeMs >= startedMs - 20 * 60 * 1000)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, 120);
+  const exact = sessionIds.length ? files.find((file) => sessionIds.some((id) => file.path.includes(id))) : undefined;
+  if (exact) {
+    return exact.path;
+  }
+  const snippets = processMatchSnippets(snapshot);
+  for (const file of files.slice(0, 50)) {
+    try {
+      const head = await readTraceTail(file.path, 0, 20000);
+      const tailOffset = Math.max(0, head.size - 30000);
+      const tail = tailOffset > 0 ? await readTraceTail(file.path, tailOffset, 30000) : head;
+      const content = `${head.content}\n${tail.content}`;
+      if ((snapshot.cwd && content.includes(snapshot.cwd)) || snippets.some((snippet) => content.includes(snippet))) {
+        return file.path;
+      }
+    } catch {
+      // Ignore traces that rotate or disappear while scanning.
+    }
+  }
+  return undefined;
+}
+
+function processMatchSnippets(snapshot: ProcessSnapshot): string[] {
+  return uniqueStrings(
+    [
+      ...snapshot.argv.filter((arg) => /[A-Za-z0-9_-]{8,}/.test(arg) && !arg.startsWith("/") && !arg.startsWith("--")),
+      ...Array.from(snapshot.argsText.matchAll(/[A-Za-z0-9_.-]*skillscope[A-Za-z0-9_.-]*/gi)).map((match) => match[0])
+    ].map((value) => value.slice(0, 96))
+  ).slice(0, 8);
+}
+
+function detectArtifactPaths(snapshot: ProcessSnapshot): Array<{ label: string; path: string; size?: number; mtime?: string }> {
+  const artifacts: Array<{ label: string; path: string; size?: number; mtime?: string }> = [];
+  const cwd = snapshot.cwd || process.cwd();
+  const add = (label: string, value: string | undefined) => {
+    if (!value || value.startsWith("-")) {
+      return;
+    }
+    const cleaned = value.replace(/^["']|["']$/g, "").replace(/[;,)]$/g, "");
+    if (!/[./]/.test(cleaned)) {
+      return;
+    }
+    const resolved = path.resolve(cwd, cleaned);
+    if (existsSync(resolved)) {
+      artifacts.push({ label, path: resolved });
+    }
+  };
+  snapshot.argv.forEach((arg, index) => {
+    if (/^(--out|--output|--output-last-message|--log|--log-file|--report|--report-out|-o)$/i.test(arg)) {
+      add(arg.replace(/^-+/, ""), snapshot.argv[index + 1]);
+    }
+    const inline = arg.match(/^(--out|--output|--output-last-message|--log|--log-file|--report|--report-out)=([^ ]+)$/i);
+    if (inline) {
+      add(inline[1].replace(/^-+/, ""), inline[2]);
+    }
+    if (arg === ">" || arg === ">>") {
+      add("redirect", snapshot.argv[index + 1]);
+    }
+    if (/\.(?:log|jsonl|json|txt|out|err|md)$/i.test(arg)) {
+      add("file", arg);
+    }
+  });
+  return uniqueArtifacts(artifacts).map((artifact) => ({ ...artifact, ...artifactStatFields(artifact.path) }));
+}
+
+function detectDockerContainers(argsText: string): string[] {
+  const names = [
+    ...Array.from(argsText.matchAll(/\b--name(?:=|\s+)([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\b/g)).map((match) => match[1]),
+    ...Array.from(argsText.matchAll(/\bdocker\s+(?:container\s+)?(?:start|stop|rm)\s+(?:-[^\s]+\s+)*([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\b/g)).map(
+      (match) => match[1]
+    )
+  ];
+  return uniqueStrings(names.filter((name) => !name.startsWith("-")));
+}
+
+async function findDockerContainersForProcess(pid: number | undefined, pgid: number | undefined): Promise<string[]> {
+  if (process.platform === "win32" || (!pid && !pgid)) {
+    return [];
+  }
+  try {
+    const rows = await execFileText("ps", ["-eo", "pid=,ppid=,pgid=,args="]);
+    const names = rows
+      .split(/\r?\n/)
+      .map((row) => row.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/))
+      .filter((match): match is RegExpMatchArray => Boolean(match))
+      .filter((match) => Number(match[1]) === pid || Number(match[3]) === pgid)
+      .flatMap((match) => detectDockerContainers(match[4]));
+    return uniqueStrings(names);
+  } catch {
+    return [];
+  }
+}
+
+async function stopDockerContainers(names: string[]): Promise<string[]> {
+  const stopped: string[] = [];
+  for (const name of uniqueStrings(names)) {
+    try {
+      await execFileText("docker", ["rm", "-f", name]);
+      stopped.push(name);
+    } catch {
+      // Docker may be unavailable or the container may already be gone.
+    }
+  }
+  return stopped;
+}
+
+function uniqueArtifacts(artifacts: Array<{ label: string; path: string; size?: number; mtime?: string }>) {
+  const seen = new Set<string>();
+  return artifacts.filter((artifact) => {
+    if (seen.has(artifact.path)) {
+      return false;
+    }
+    seen.add(artifact.path);
+    return true;
+  });
+}
+
+function artifactStatFields(filePath: string): { size?: number; mtime?: string } {
+  try {
+    const info = statSync(filePath);
+    return { size: info.size, mtime: info.mtime.toISOString() };
+  } catch {
+    return {};
+  }
+}
+
+function readProcessCwd(pid: number): string | undefined {
+  try {
+    return readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    return undefined;
+  }
+}
+
 function splitCommandLine(value: string): string[] {
   return value.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((item) => item.replace(/^["']|["']$/g, "")) ?? [];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function elapsedToStartedAt(elapsed: string): string {

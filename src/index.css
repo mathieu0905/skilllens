@@ -270,6 +270,61 @@ textarea {
   font-size: 12px;
 }
 
+.home-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+  max-width: 980px;
+}
+
+.home-mode-card {
+  min-width: 0;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+  text-align: left;
+}
+
+.home-mode-card.monitor {
+  border-color: #b7cdf7;
+  background: #f7fbff;
+}
+
+.home-mode-card span,
+.home-mode-card strong,
+.home-mode-card small {
+  display: block;
+}
+
+.home-mode-card span {
+  color: #405065;
+  font-size: 13px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.home-mode-card strong {
+  margin-top: 8px;
+  color: #17202a;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.home-mode-card small {
+  margin-top: 5px;
+  color: #5f6f82;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.home-mode-card.passive {
+  cursor: default;
+}
+
 .session-search {
   height: 42px;
   max-width: 680px;
@@ -1962,6 +2017,16 @@ textarea {
   padding: 14px;
 }
 
+.monitor-page {
+  height: 100%;
+  overflow: auto;
+  padding: 20px 24px 24px;
+}
+
+.monitor-page-topbar {
+  margin-bottom: 12px;
+}
+
 .monitor-only .process-monitor-panel {
   margin-top: 14px;
 }
@@ -2194,6 +2259,41 @@ textarea {
   font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.process-artifacts {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.process-artifacts details {
+  border: 1px solid #dbe3ee;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.process-artifacts summary {
+  cursor: pointer;
+  padding: 6px 8px;
+  color: #405065;
+  font-size: 11px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.process-artifacts pre {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  border-top: 1px solid #dbe3ee;
+  background: #101827;
+  color: #d9e6f2;
+  padding: 8px;
+  font-family: "SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .secondary-button.danger {

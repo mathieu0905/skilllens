@@ -22,6 +22,7 @@
     "cia:audit": "tsx scripts/cia-audit.ts",
     "skillsbench": "tsx scripts/skillsbench.ts",
     "codex": "tsx scripts/codex.ts",
+    "monitor:smoke": "tsx scripts/monitor-smoke.ts",
     "install:codex-prompt": "tsx scripts/install-codex-prompt.ts"
   },
   "dependencies": {
