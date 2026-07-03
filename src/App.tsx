@@ -4038,6 +4038,8 @@ function JobDetail({
   const progress = progressWithTail(job, artifactTails);
   const primaryArtifact = job.artifacts[0];
   const stopSummary = stopResult ? stopResultSummary(stopResult) : stopPlan ? stopPlanSummary(stopPlan) : job.canStop ? "Preview the safe stop plan before stopping anything." : "Root agent is protected; no stoppable child task is available.";
+  const hasStopTargets = stopPlan ? stopPlanHasTargets(stopPlan) : false;
+  const nextAction = jobNextAction(job, progress, stopPlan, stopResult);
   return (
     <div className="monitor-panel job-detail">
       <div className="stream-head">
@@ -4066,6 +4068,11 @@ function JobDetail({
         <span>Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
         {primaryArtifact ? <span>Primary artifact: {primaryArtifact.path}</span> : null}
         {job.historyPath ? <code>{job.historyPath}</code> : null}
+      </div>
+      <div className={`job-next-action ${nextAction.tone}`}>
+        <span>Next action</span>
+        <strong>{nextAction.title}</strong>
+        <p>{nextAction.body}</p>
       </div>
       <JobProgress progress={progress} />
       <section>
@@ -4099,11 +4106,11 @@ function JobDetail({
         {job.canStop ? (
           <div className="job-stop-actions">
             <button className="secondary-button" onClick={onPreview} disabled={busy}>
-              Preview stop
+              {busy && !stopPlan ? "Preparing preview..." : "Preview stop safely"}
             </button>
             {stopPlan ? (
-              <button className="secondary-button danger" onClick={onStop} disabled={busy}>
-                Execute stop
+              <button className="secondary-button danger" onClick={onStop} disabled={busy || !hasStopTargets}>
+                {busy ? "Stopping..." : "Execute stop"}
               </button>
             ) : null}
           </div>
@@ -4190,13 +4197,24 @@ function StopPlanView({ plan }: { plan: AgentStopPlan }) {
 function StopResultView({ result }: { result: AgentStopResult }) {
   const residualProcesses = result.residualProcesses ?? [];
   const residualContainers = result.residualContainers ?? [];
+  const killed = result.killedProcesses.filter((item) => item.ok).length;
+  const removed = result.removedContainers.filter((item) => item.ok).length;
   return (
     <div className="stop-plan result">
       <strong>Stop result</strong>
-      <p>Processes killed: {result.killedProcesses.filter((item) => item.ok).length}/{result.killedProcesses.length}</p>
-      <p>Containers removed: {result.removedContainers.filter((item) => item.ok).length}/{result.removedContainers.length}</p>
-      <p>Residual processes: {residualProcesses.length ? residualProcesses.map((item) => item.pgid ? `pgid ${item.pgid}` : `pid ${item.pid}`).join(", ") : "none"}</p>
-      <p>Residual containers: {residualContainers.length ? residualContainers.join(", ") : "none"}</p>
+      <p className={result.cleanupErrors.length ? "stop-result-summary failed" : "stop-result-summary success"}>{stopResultSummary(result)}</p>
+      <div className="stop-result-grid">
+        <div>
+          <span>Handled</span>
+          <p>{killed}/{result.killedProcesses.length} process targets stopped</p>
+          <p>{removed}/{result.removedContainers.length} containers removed</p>
+        </div>
+        <div>
+          <span>Needs review</span>
+          <p>Residual processes: {residualProcesses.length ? residualProcesses.map((item) => item.pgid ? `pgid ${item.pgid}` : `pid ${item.pid}`).join(", ") : "none"}</p>
+          <p>Residual containers: {residualContainers.length ? residualContainers.join(", ") : "none"}</p>
+        </div>
+      </div>
       {result.cleanupErrors.length ? <pre>{result.cleanupErrors.join("\n")}</pre> : <p>No cleanup errors.</p>}
     </div>
   );
@@ -4296,6 +4314,71 @@ function jobAttentionReason(job: AgentJob, progress: AgentJobProgress): string {
     return `Progress is visible: ${Math.round(progress.percent)}% inferred from artifacts.`;
   }
   return "Live job with output and artifacts grouped for review.";
+}
+
+function jobNextAction(
+  job: AgentJob,
+  progress: AgentJobProgress,
+  stopPlan?: AgentStopPlan,
+  stopResult?: AgentStopResult
+): { tone: "normal" | "warn" | "danger" | "success"; title: string; body: string } {
+  if (stopResult?.cleanupErrors.length) {
+    return {
+      tone: "danger",
+      title: "Review cleanup issues",
+      body: "Check residual processes and containers before starting another run that reuses the same files or container names."
+    };
+  }
+  if (stopResult) {
+    return {
+      tone: "success",
+      title: "Review the finished run",
+      body: "The stop result is saved in Recent history. Inspect the latest output or history path if you need to keep evidence."
+    };
+  }
+  if (job.status === "stale") {
+    return {
+      tone: "warn",
+      title: "Decide whether it is blocked",
+      body: stopPlan
+        ? "The safe stop preview is ready. Stop only the listed child targets if the task should not keep running."
+        : "Look at the latest output first. If it is not expected to be quiet, preview a safe stop before stopping anything."
+    };
+  }
+  if (stopPlan) {
+    return {
+      tone: stopPlanHasTargets(stopPlan) ? "warn" : "normal",
+      title: stopPlanHasTargets(stopPlan) ? "Confirm the stop list" : "No stoppable targets",
+      body: stopPlanHasTargets(stopPlan)
+        ? "Only the targets under Will stop will be touched. The root agent remains protected."
+        : "The preview found no child process group or container to stop, so execution is disabled."
+    };
+  }
+  if (job.canStop) {
+    return {
+      tone: "normal",
+      title: "Watch progress or preview stop",
+      body: progress.percent !== undefined
+        ? `Progress is at ${Math.round(progress.percent)}%. Preview safe stop first if you need to interrupt it.`
+        : "Output is updating without a fixed total. Preview safe stop first if you need to interrupt it."
+    };
+  }
+  if (job.status === "recent") {
+    return {
+      tone: "normal",
+      title: "Review history",
+      body: "This job is no longer active. Use the latest output and artifact path for follow-up."
+    };
+  }
+  return {
+    tone: "normal",
+    title: "No stop action available",
+    body: "Only protected root or inherited processes are visible for this job."
+  };
+}
+
+function stopPlanHasTargets(plan: AgentStopPlan): boolean {
+  return Boolean(plan.processTargets.length || plan.containers.length);
 }
 
 function stopPlanSummary(plan: AgentStopPlan): string {
@@ -5078,7 +5161,7 @@ function cleanJobOutputLine(line: string): string {
   }
   try {
     const parsed = JSON.parse(trimmed) as unknown;
-    return summarizeTraceJson(parsed) ?? truncate(trimmed.replace(/\s+/g, " "), 160);
+    return summarizeTraceJson(parsed) ?? "Trace event";
   } catch {
     return truncate(trimmed.replace(/\s+/g, " "), 160);
   }
@@ -5101,15 +5184,30 @@ function summarizeTraceJson(value: unknown): string | null {
     stringField(record, "summary") ??
     stringField(record, "content") ??
     stringField(record, "delta") ??
+    stringField(record, "output") ??
+    stringField(record, "arguments") ??
     nestedTraceText(record);
   if (text) {
     const prefix = type ? `${humanizeTraceType(type)}: ` : "";
-    return truncate(`${prefix}${text.replace(/\s+/g, " ")}`, 160);
+    return truncate(`${prefix}${summarizeTraceText(text)}`, 160);
   }
   if (type && name) {
     return truncate(`${humanizeTraceType(type)}: ${name}`, 160);
   }
   return type ? humanizeTraceType(type) : null;
+}
+
+function summarizeTraceText(text: string): string {
+  const compact = text.trim().replace(/\s+/g, " ");
+  if (!compact.startsWith("{") && !compact.startsWith("[")) {
+    return compact;
+  }
+  try {
+    const parsed = JSON.parse(compact) as unknown;
+    return summarizeTraceJson(parsed) ?? "structured output";
+  } catch {
+    return "structured output";
+  }
 }
 
 function nestedTraceText(record: Record<string, unknown>): string | null {
