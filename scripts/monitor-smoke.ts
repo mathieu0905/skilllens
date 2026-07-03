@@ -72,6 +72,7 @@ const baseEvidenceFeatures = [
   "safe-stop-result",
   "recent-history",
   "issues-filter",
+  "attention-sort",
   "stale-job-filter"
 ];
 const dockerEvidenceFeatures = [
@@ -208,6 +209,18 @@ async function runStaleJobCase() {
       assert(issuesClicked.result?.value === true, "Issues filter should be visible");
       await browser.waitForText("stale-codex-output.log", 15000);
       await captureEvidence(browser, "06-issues-filter-visible.png", "issues-filter", "issues filter groups stale jobs and cleanup failures that need attention");
+      const attentionSorted = await browser.evaluate(`
+        (() => {
+          const select = document.querySelector('select[aria-label="Sort jobs"]');
+          if (!(select instanceof HTMLSelectElement)) return 'missing-sort';
+          select.value = 'attention';
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return select.value;
+        })()
+      `);
+      assert(attentionSorted.result?.value === "attention", `attention sort should be selectable, got ${attentionSorted.result?.value}`);
+      await browser.waitForText("attention priority", 15000);
+      await captureEvidence(browser, "06a-attention-sort-visible.png", "attention-sort", "needs-attention sort prioritizes cleanup failures and stale jobs");
 
       const staleClicked = await browser.evaluate(`
         (() => {

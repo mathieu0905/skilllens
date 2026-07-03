@@ -46,6 +46,7 @@ type View = "coverage" | "graph" | "timeline" | "compare" | "analysis" | "monito
 type TimelineFilter = "all" | "skill" | "violations" | "tools" | "final";
 type Locale = "zh" | "en";
 type JobFilter = "active" | "issues" | "recent" | "stale" | "docker";
+type JobSort = "attention" | "updated" | "runtime" | "title";
 
 const TIMELINE_PAGE_SIZE = 120;
 
@@ -3574,8 +3575,8 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
     readMonitorPreference("skillscope.monitor.filter", "active", ["active", "issues", "recent", "stale", "docker"] as const)
   );
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<"updated" | "runtime" | "title">(() =>
-    readMonitorPreference("skillscope.monitor.sort", "updated", ["updated", "runtime", "title"] as const)
+  const [sort, setSort] = useState<JobSort>(() =>
+    readMonitorPreference("skillscope.monitor.sort", "updated", ["attention", "updated", "runtime", "title"] as const)
   );
   const [autoRefresh, setAutoRefresh] = useState(() => readMonitorPreference("skillscope.monitor.autoRefresh", "true", ["true", "false"] as const) === "true");
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -3833,7 +3834,8 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
               aria-label="Search jobs"
             />
           </label>
-          <select value={sort} onChange={(event) => setSort(event.target.value as "updated" | "runtime" | "title")} aria-label="Sort jobs">
+          <select value={sort} onChange={(event) => setSort(event.target.value as JobSort)} aria-label="Sort jobs">
+            <option value="attention">Needs attention</option>
             <option value="updated">Latest update</option>
             <option value="runtime">Longest runtime</option>
             <option value="title">Title</option>
@@ -4051,11 +4053,11 @@ function jobListSummary(filter: JobFilter, visibleCount: number, totalCount: num
 
 function jobListDetail(
   filter: JobFilter,
-  sort: "updated" | "runtime" | "title",
+  sort: JobSort,
   autoRefresh: boolean,
   metrics: { issues: number; failures: number }
 ): string {
-  const sortLabel = sort === "runtime" ? "longest runtime" : sort === "title" ? "title" : "latest update";
+  const sortLabel = sort === "attention" ? "attention priority" : sort === "runtime" ? "longest runtime" : sort === "title" ? "title" : "latest update";
   const refreshLabel = autoRefresh ? "Live refresh every 2s" : "Paused";
   if (filter === "issues") {
     const cleanup = metrics.failures ? `, including ${metrics.failures} cleanup issue${metrics.failures === 1 ? "" : "s"}` : "";
@@ -5223,7 +5225,14 @@ function jobSearchText(job: AgentJob): string {
     .toLowerCase();
 }
 
-function compareJobs(left: AgentJob, right: AgentJob, sort: "updated" | "runtime" | "title"): number {
+function compareJobs(left: AgentJob, right: AgentJob, sort: JobSort): number {
+  if (sort === "attention") {
+    const attentionDelta = jobAttentionScore(right) - jobAttentionScore(left);
+    if (attentionDelta !== 0) {
+      return attentionDelta;
+    }
+    return right.staleSeconds - left.staleSeconds || Date.parse(right.lastUpdatedAt) - Date.parse(left.lastUpdatedAt);
+  }
   if (sort === "title") {
     return left.title.localeCompare(right.title);
   }
@@ -5231,6 +5240,20 @@ function compareJobs(left: AgentJob, right: AgentJob, sort: "updated" | "runtime
     return jobRuntimeMs(right) - jobRuntimeMs(left);
   }
   return Date.parse(right.lastUpdatedAt) - Date.parse(left.lastUpdatedAt);
+}
+
+function jobAttentionScore(job: AgentJob): number {
+  let score = 0;
+  if (job.status === "failed" || job.lastStopResult?.cleanupErrors.length) {
+    score += 3000;
+  }
+  if (job.status === "stale") {
+    score += 2000 + Math.min(job.staleSeconds, 999);
+  }
+  if (job.containers.length && job.status !== "stopped") {
+    score += 100;
+  }
+  return score;
 }
 
 function jobRuntimeMs(job: AgentJob): number {

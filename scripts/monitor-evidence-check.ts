@@ -33,6 +33,7 @@ const baseEvidenceFeatures = [
   "safe-stop-result",
   "recent-history",
   "issues-filter",
+  "attention-sort",
   "stale-job-filter"
 ];
 const dockerEvidenceFeatures = [
