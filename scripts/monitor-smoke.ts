@@ -69,6 +69,7 @@ const baseEvidenceFeatures = [
   "safe-stop-preview",
   "safe-stop-result",
   "recent-history",
+  "issues-filter",
   "stale-job-filter"
 ];
 const dockerEvidenceFeatures = [
@@ -181,15 +182,27 @@ async function runStaleJobCase() {
     const staleJob = await waitForJob((item) => hasArtifact(item, staleArtifact) && item.status === "stale", 45000);
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
-      await browser.evaluate(`
+      const issuesClicked = await browser.evaluate(`
+        (() => {
+          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Issues'));
+          button?.click();
+          return Boolean(button);
+        })()
+      `);
+      assert(issuesClicked.result?.value === true, "Issues filter should be visible");
+      await browser.waitForText("stale-codex-output.log", 15000);
+      await captureEvidence(browser, "06-issues-filter-visible.png", "issues-filter", "issues filter groups stale jobs and cleanup failures that need attention");
+
+      const staleClicked = await browser.evaluate(`
         (() => {
           const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Stale'));
           button?.click();
           return Boolean(button);
         })()
       `);
+      assert(staleClicked.result?.value === true, "Stale filter should be visible");
       await browser.waitForText("stale-codex-output.log", 15000);
-      await captureEvidence(browser, "06-stale-job-visible.png", "stale-job-filter", "stale filter exposes jobs with no artifact/log updates for more than 30 seconds");
+      await captureEvidence(browser, "06b-stale-job-visible.png", "stale-job-filter", "stale filter exposes jobs with no artifact/log updates for more than 30 seconds");
     } finally {
       await browser.close();
     }

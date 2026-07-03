@@ -44,6 +44,7 @@ import type {
 type View = "coverage" | "graph" | "timeline" | "compare" | "analysis" | "monitor" | "experiments" | "rewrite" | "report";
 type TimelineFilter = "all" | "skill" | "violations" | "tools" | "final";
 type Locale = "zh" | "en";
+type JobFilter = "active" | "issues" | "recent" | "stale" | "docker";
 
 const TIMELINE_PAGE_SIZE = 120;
 
@@ -3568,8 +3569,8 @@ function MonitorPage({
 function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (processEvent: AgentProcessEvent) => void }) {
   const locale = useLocale();
   const [jobs, setJobs] = useState<AgentJob[]>([]);
-  const [filter, setFilter] = useState<"active" | "recent" | "stale" | "docker">(() =>
-    readMonitorPreference("skillscope.monitor.filter", "active", ["active", "recent", "stale", "docker"] as const)
+  const [filter, setFilter] = useState<JobFilter>(() =>
+    readMonitorPreference("skillscope.monitor.filter", "active", ["active", "issues", "recent", "stale", "docker"] as const)
   );
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"updated" | "runtime" | "title">(() =>
@@ -3597,6 +3598,9 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
       if (filter === "docker") {
         return job.containers.length > 0;
       }
+      if (filter === "issues") {
+        return jobNeedsAttention(job);
+      }
       if (filter === "recent") {
         return ["recent", "stopped", "failed"].includes(job.status);
       }
@@ -3619,6 +3623,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
       stale: jobs.filter((job) => job.status === "stale").length,
       containers: jobs.reduce((count, job) => count + job.containers.length, 0),
       failures: jobs.filter((job) => job.status === "failed" || job.lastStopResult?.cleanupErrors.length).length,
+      issues: jobs.filter(jobNeedsAttention).length,
       recent: jobs.filter((job) => ["recent", "stopped", "failed"].includes(job.status)).length,
       dockerJobs: jobs.filter((job) => job.containers.length).length
     }),
@@ -3804,15 +3809,15 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
           </div>
         ) : null}
         <div className="job-metrics">
-          <JobMetric label="active jobs" value={metrics.active} tone="active" />
-          <JobMetric label="stale jobs" value={metrics.stale} tone={metrics.stale ? "warn" : "normal"} />
-          <JobMetric label="containers" value={metrics.containers} tone="normal" />
-          <JobMetric label="recent failures" value={metrics.failures} tone={metrics.failures ? "danger" : "normal"} />
+          <JobMetric label="active jobs" value={metrics.active} tone="active" active={filter === "active"} onClick={() => setFilter("active")} />
+          <JobMetric label="needs attention" value={metrics.issues} tone={metrics.issues ? "warn" : "normal"} active={filter === "issues"} onClick={() => setFilter("issues")} />
+          <JobMetric label="containers" value={metrics.containers} tone="normal" active={filter === "docker"} onClick={() => setFilter("docker")} />
+          <JobMetric label="cleanup issues" value={metrics.failures} tone={metrics.failures ? "danger" : "normal"} active={false} onClick={() => setFilter("issues")} />
         </div>
         <div className="job-filter-row" role="tablist" aria-label="Job filters">
-          {(["active", "recent", "stale", "docker"] as const).map((item) => (
+          {(["active", "issues", "recent", "stale", "docker"] as const).map((item) => (
             <button key={item} className={filter === item ? "segmented active" : "segmented"} onClick={() => setFilter(item)}>
-              {item === "docker" ? "Docker" : item[0].toUpperCase() + item.slice(1)}
+              {jobFilterLabel(item)}
               <span>{jobFilterCount(item, metrics)}</span>
             </button>
           ))}
@@ -3926,9 +3931,9 @@ function JobEmptyState({
   onShowDocker,
   onRefresh
 }: {
-  filter: "active" | "recent" | "stale" | "docker";
+  filter: JobFilter;
   query: string;
-  metrics: { active: number; stale: number; recent: number; dockerJobs: number };
+  metrics: { active: number; stale: number; issues: number; recent: number; dockerJobs: number };
   onClearQuery: () => void;
   onShowActive: () => void;
   onShowRecent: () => void;
@@ -3978,7 +3983,7 @@ function JobDetailEmpty({
   onShowRecent,
   onRefresh
 }: {
-  filter: "active" | "recent" | "stale" | "docker";
+  filter: JobFilter;
   query: string;
   metrics: { recent: number };
   onClearQuery: () => void;
@@ -4009,12 +4014,24 @@ function JobDetailEmpty({
   );
 }
 
-function JobMetric({ label, value, tone }: { label: string; value: number; tone: "active" | "warn" | "danger" | "normal" }) {
+function JobMetric({
+  label,
+  value,
+  tone,
+  active,
+  onClick
+}: {
+  label: string;
+  value: number;
+  tone: "active" | "warn" | "danger" | "normal";
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
-    <div className={`job-metric ${tone}`}>
+    <button className={active ? `job-metric ${tone} selected` : `job-metric ${tone}`} onClick={onClick}>
       <span>{label}</span>
       <strong>{value}</strong>
-    </div>
+    </button>
   );
 }
 
@@ -4236,9 +4253,12 @@ function jobStatusLabel(job: AgentJob): string {
   return "Recent";
 }
 
-function jobEmptyTitle(filter: "active" | "recent" | "stale" | "docker"): string {
+function jobEmptyTitle(filter: JobFilter): string {
   if (filter === "active") {
     return "No active jobs";
+  }
+  if (filter === "issues") {
+    return "No jobs need attention";
   }
   if (filter === "recent") {
     return "No recent jobs";
@@ -4249,11 +4269,14 @@ function jobEmptyTitle(filter: "active" | "recent" | "stale" | "docker"): string
   return "No Docker jobs";
 }
 
-function jobEmptyMessage(filter: "active" | "recent" | "stale" | "docker", metrics: { recent?: number; active?: number; dockerJobs?: number }): string {
+function jobEmptyMessage(filter: JobFilter, metrics: { recent?: number; active?: number; dockerJobs?: number }): string {
   if (filter === "active") {
     return metrics.recent
       ? "Nothing is running right now. Recent jobs are still available for review."
       : "Start a Codex or Claude benchmark, experiment, or long-running command and it will appear here.";
+  }
+  if (filter === "issues") {
+    return "No stale jobs or cleanup failures are waiting for review.";
   }
   if (filter === "recent") {
     return "Stopped or completed jobs will appear here after they leave Active.";
@@ -5059,9 +5082,22 @@ function writeMonitorPreference(key: string, value: string) {
   window.localStorage.setItem(key, value);
 }
 
-function jobFilterCount(filter: "active" | "recent" | "stale" | "docker", metrics: { active: number; stale: number; recent: number; dockerJobs: number }) {
+function jobFilterLabel(filter: JobFilter): string {
+  if (filter === "docker") {
+    return "Docker";
+  }
+  if (filter === "issues") {
+    return "Issues";
+  }
+  return filter[0].toUpperCase() + filter.slice(1);
+}
+
+function jobFilterCount(filter: JobFilter, metrics: { active: number; issues: number; stale: number; recent: number; dockerJobs: number }) {
   if (filter === "active") {
     return metrics.active;
+  }
+  if (filter === "issues") {
+    return metrics.issues;
   }
   if (filter === "stale") {
     return metrics.stale;
@@ -5070,6 +5106,10 @@ function jobFilterCount(filter: "active" | "recent" | "stale" | "docker", metric
     return metrics.dockerJobs;
   }
   return metrics.recent;
+}
+
+function jobNeedsAttention(job: AgentJob): boolean {
+  return job.status === "stale" || job.status === "failed" || Boolean(job.lastStopResult?.cleanupErrors.length);
 }
 
 function jobSearchText(job: AgentJob): string {

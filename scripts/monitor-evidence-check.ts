@@ -30,6 +30,7 @@ const baseEvidenceFeatures = [
   "safe-stop-preview",
   "safe-stop-result",
   "recent-history",
+  "issues-filter",
   "stale-job-filter"
 ];
 const dockerEvidenceFeatures = [
@@ -112,4 +113,3 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
-

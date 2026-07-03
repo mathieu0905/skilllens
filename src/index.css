@@ -2380,6 +2380,25 @@ textarea {
   border-radius: 8px;
   background: #ffffff;
   padding: 10px 12px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.job-metric:hover {
+  border-color: #9eb6d8;
+  transform: translateY(-1px);
+}
+
+.job-metric:focus-visible {
+  outline: 3px solid rgba(25, 103, 210, 0.18);
+  outline-offset: 2px;
+}
+
+.job-metric.selected {
+  border-color: #1967d2;
+  box-shadow: 0 0 0 3px rgba(25, 103, 210, 0.1);
 }
 
 .job-metric span,
