@@ -32,6 +32,8 @@ type TrialMode = "with" | "without" | "unknown";
 interface CliOptions {
   command: Command;
   skillsbenchRoot?: string;
+  dataset?: string;
+  prebuiltTaskEnv?: string;
   runsRoot?: string;
   plan?: string;
   trialsFile?: string;
@@ -63,12 +65,17 @@ interface TaskPlan {
   taskPath: string;
   skillsDir: string;
   skillPaths: string[];
+  environmentManifestPath?: string;
+  prebuiltTaskEnvImage?: string;
 }
 
 interface SkillsBenchRunPlan {
   schemaVersion: "skillscope.skillsbench-run-plan.v1";
   createdAt: string;
   skillsbenchRoot: string;
+  benchDataset?: string;
+  prebuiltTaskEnvTemplate?: string;
+  prebuiltManifestDir?: string;
   agent: string;
   model: string;
   trialsPerTask: number;
@@ -184,6 +191,8 @@ interface RateAggregate {
   passRate: number | null;
 }
 
+const defaultSkillsBenchPrebuiltTemplate = "ghcr.io/benchflow-ai/skillsbench-task-env:standard-v1-{task}";
+
 interface TargetRateAggregate {
   counts: Record<CoverageStatus, number>;
   totalConstraints: number;
@@ -229,26 +238,55 @@ async function main() {
 async function createRunPlan(options: CliOptions) {
   const root = requirePath(options.skillsbenchRoot, "--skillsbench-root");
   const outDir = path.resolve(options.out ?? ".skilllens/experiments/skillsbench-codex-gpt55");
-  const tasks = await discoverTasks(root, options);
+  const manifestDir = options.prebuiltTaskEnv ? path.join(outDir, "manifests") : undefined;
+  const tasks = (await discoverTasks(root, options)).map((task) => {
+    if (!options.prebuiltTaskEnv || !manifestDir) {
+      return task;
+    }
+    return {
+      ...task,
+      prebuiltTaskEnvImage: renderTaskImageTemplate(options.prebuiltTaskEnv, task.id),
+      environmentManifestPath: path.join(manifestDir, `${safeName(task.id)}.environment.toml`)
+    };
+  });
+  const benchExtraArgs = options.prebuiltTaskEnv ? withDockerSandbox(options.benchExtraArgs) : options.benchExtraArgs;
   const plan: SkillsBenchRunPlan = {
     schemaVersion: "skillscope.skillsbench-run-plan.v1",
     createdAt: new Date().toISOString(),
     skillsbenchRoot: path.resolve(root),
+    benchDataset: options.dataset,
+    prebuiltTaskEnvTemplate: options.prebuiltTaskEnv,
+    prebuiltManifestDir: manifestDir,
     agent: options.agent,
     model: options.model,
     trialsPerTask: options.trials,
     includeNoSkill: options.includeNoSkill,
-    benchExtraArgs: options.benchExtraArgs,
+    benchExtraArgs,
     tasks
   };
 
   await mkdir(outDir, { recursive: true });
+  if (manifestDir) {
+    await mkdir(manifestDir, { recursive: true });
+    for (const task of tasks) {
+      if (task.environmentManifestPath && task.prebuiltTaskEnvImage) {
+        await writeFile(task.environmentManifestPath, renderEnvironmentManifest(task));
+      }
+    }
+    const pullScriptPath = path.join(outDir, "pull-prebuilt-images.sh");
+    await writeFile(pullScriptPath, renderPrebuiltPullScript(plan));
+    await chmod(pullScriptPath, 0o755);
+  }
   await writeFile(path.join(outDir, "run-plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
   await writeFile(path.join(outDir, "run-original.sh"), renderOriginalRunScript(plan));
   await writeFile(path.join(outDir, "tasks.txt"), `${tasks.map((task) => task.id).join("\n")}\n`);
   await writeFile(path.join(outDir, "README.md"), renderExperimentReadme(plan));
   console.log(`Planned ${tasks.length} SkillsBench task(s) for ${options.agent}+${options.model}.`);
   console.log(`Wrote ${path.join(outDir, "run-plan.json")} and ${path.join(outDir, "run-original.sh")}`);
+  if (manifestDir) {
+    console.log(`Wrote per-task prebuilt environment manifests under ${manifestDir}`);
+    console.log(`Optional prepull script: ${path.join(outDir, "pull-prebuilt-images.sh")}`);
+  }
 }
 
 async function collectTrials(options: CliOptions) {
@@ -1313,7 +1351,7 @@ function renderOriginalRunScript(plan: SkillsBenchRunPlan): string {
             "original",
             task.id,
             trial,
-            benchCommand(plan, task.taskDir, "original", task.id, trial, ["--skill-mode", "with-skill", "--skills-dir", task.skillsDir])
+            benchCommand(plan, task, "original", task.id, trial, ["--skill-mode", "with-skill", "--skills-dir", task.skillsDir])
           )
         );
         if (plan.includeNoSkill) {
@@ -1324,7 +1362,7 @@ function renderOriginalRunScript(plan: SkillsBenchRunPlan): string {
               "no-skill",
               task.id,
               trial,
-              benchCommand(plan, task.taskDir, "no-skill", task.id, trial, ["--skill-mode", "no-skill"])
+              benchCommand(plan, task, "no-skill", task.id, trial, ["--skill-mode", "no-skill"])
             )
           );
         }
@@ -1349,7 +1387,7 @@ function renderOptimizedRunScript(plan: SkillsBenchRunPlan, optimizedRoot: strin
             "optimized",
             task.id,
             trial,
-            benchCommand(plan, task.taskDir, "optimized", task.id, trial, ["--skill-mode", "with-skill", "--skills-dir", optimizedSkillsDir])
+            benchCommand(plan, task, "optimized", task.id, trial, ["--skill-mode", "with-skill", "--skills-dir", optimizedSkillsDir])
           )
         );
       }
@@ -1396,31 +1434,70 @@ function relativeSkillPathWithinSkillsDir(task: TaskPlan, skillPath: string): st
   return relativeToSkillsDir;
 }
 
+function renderTaskImageTemplate(template: string, taskId: string): string {
+  return ["{task}", "${task}", "%TASK%"].reduce((value, token) => value.split(token).join(taskId), template);
+}
+
+function withDockerSandbox(args: string[]): string[] {
+  const hasSandbox = args.some((arg, index) => arg === "--sandbox" || args[index - 1] === "--sandbox");
+  return hasSandbox ? args : ["--sandbox", "docker", ...args];
+}
+
+function renderEnvironmentManifest(task: TaskPlan): string {
+  if (!task.prebuiltTaskEnvImage) {
+    throw new Error(`Task ${task.id} is missing prebuiltTaskEnvImage`);
+  }
+  return [
+    "[environment]",
+    `name = "${tomlString(`${safeName(task.id)}-prebuilt`)}"`,
+    `image = "${tomlString(task.prebuiltTaskEnvImage)}"`,
+    "owns_lifecycle = true",
+    "keep_alive = true",
+    'isolation = "per_task"',
+    ""
+  ].join("\n");
+}
+
+function renderPrebuiltPullScript(plan: SkillsBenchRunPlan): string {
+  const images = [...new Set(plan.tasks.map((task) => task.prebuiltTaskEnvImage).filter((image): image is string => Boolean(image)))];
+  return `#!/usr/bin/env bash
+set -euo pipefail
+
+# Pull prebuilt SkillsBench task environment images before running trials.
+# This is optional; Docker will also pull missing images when BenchFlow starts each task.
+${images.map((image) => `docker pull ${shellQuote(image)}`).join("\n")}
+`;
+}
+
 function runTrialCommand(condition: string, taskId: string, trial: number, command: string): string {
   return `run_trial ${shellQuote(condition)} ${shellQuote(taskId)} ${shellQuote(String(trial))} ${command}`;
 }
 
 function benchCommand(
   plan: SkillsBenchRunPlan,
-  taskDir: string,
+  task: TaskPlan,
   condition: string,
   taskId: string,
   trial: number,
   conditionArgs: string[]
 ): string {
   const jobsDirExpr = `"${"$"}SCRIPT_DIR/jobs/${safeName(condition)}/${safeName(taskId)}/trial-${trial}"`;
+  const taskSourceArgs = plan.benchDataset
+    ? ["-d", plan.benchDataset, "--include", taskId]
+    : ["--tasks-dir", task.taskDir];
+  const environmentArgs = task.environmentManifestPath ? ["--environment-manifest", task.environmentManifestPath] : [];
   return [
     "bench",
     "eval",
     "run",
-    "--tasks-dir",
-    shellQuote(taskDir),
+    ...taskSourceArgs.map(shellQuoteIfNeeded),
     "--agent",
     shellQuote(plan.agent),
     "--model",
     shellQuote(plan.model),
     "--jobs-dir",
     jobsDirExpr,
+    ...environmentArgs.map(shellQuoteIfNeeded),
     ...codexHostProviderArgs(plan),
     ...conditionArgs.map(shellQuoteIfNeeded),
     ...plan.benchExtraArgs.map(shellQuoteIfNeeded)
@@ -1562,12 +1639,15 @@ fi
 }
 
 function renderExperimentReadme(plan: SkillsBenchRunPlan): string {
+  const hasPrebuilt = plan.tasks.some((task) => task.prebuiltTaskEnvImage);
   return [
     "# SkillScope SkillsBench Experiment",
     "",
     `Agent/model: \`${plan.agent}\` / \`${plan.model}\``,
     `Tasks: ${plan.tasks.length}`,
     `Trials per task: ${plan.trialsPerTask}`,
+    plan.benchDataset ? `BenchFlow dataset: \`${plan.benchDataset}\`` : "BenchFlow source: local `--tasks-dir`",
+    hasPrebuilt ? `Prebuilt task env template: \`${plan.prebuiltTaskEnvTemplate}\`` : "Task envs: local Dockerfile build",
     "",
     "Protocol:",
     "",
@@ -1584,7 +1664,9 @@ function renderExperimentReadme(plan: SkillsBenchRunPlan): string {
     "SKILLSCOPE_SYNC_CODEX_AUTH=1 ./run-remote-original.sh user@remote-host",
     "```",
     "",
-    "This runs BenchFlow on the remote host with that host's local Docker daemon, not a remote image registry, then pulls artifacts back into a sibling `*-remote` experiment directory.",
+    hasPrebuilt
+      ? "This runs BenchFlow on the remote host, regenerates per-task `--environment-manifest` files, pulls the same GHCR task images there, and syncs artifacts back into a sibling `*-remote` experiment directory."
+      : "This runs BenchFlow on the remote host with that host's local Docker daemon, not a remote image registry, then pulls artifacts back into a sibling `*-remote` experiment directory. If prebuilt task images are available, regenerate the plan with `--prebuilt-skillsbench-ghcr` to avoid local Dockerfile builds.",
     "",
     "Long-run controls:",
     "",
@@ -1599,6 +1681,8 @@ function renderRemoteRunScript(plan: SkillsBenchRunPlan, experimentName: string,
   const taskArgs = plan.tasks.map((task) => `    --task ${shellQuote(task.id)}`).join(" \\\n");
   const benchArgs = plan.benchExtraArgs.map((arg) => `    --bench-arg ${shellQuote(arg)}`).join(" \\\n");
   const includeNoSkill = plan.includeNoSkill ? " \\\n    --include-no-skill" : "";
+  const datasetArg = plan.benchDataset ? ` \\\n    --dataset ${shellQuote(plan.benchDataset)}` : "";
+  const prebuiltArg = plan.prebuiltTaskEnvTemplate ? ` \\\n    --prebuilt-task-env ${shellQuote(plan.prebuiltTaskEnvTemplate)}` : "";
   const remoteHostDefault = options.remoteHost ? shellQuote(options.remoteHost) : "\"${SKILLSCOPE_REMOTE_HOST:-${1:-}}\"";
   const remoteDirDefault = options.remoteDir ? shellQuote(options.remoteDir) : "\"${SKILLSCOPE_REMOTE_DIR:-SkillScope}\"";
 
@@ -1675,7 +1759,7 @@ npm run skillsbench -- plan \\
     --out "$PWD/.skilllens/experiments/${experimentName}" \\
     --agent ${shellQuote(plan.agent)} \\
     --model ${shellQuote(plan.model)} \\
-    --trials ${plan.trialsPerTask}${includeNoSkill}${taskArgs ? ` \\\n${taskArgs}` : ""}${benchArgs ? ` \\\n${benchArgs}` : ""}
+    --trials ${plan.trialsPerTask}${datasetArg}${prebuiltArg}${includeNoSkill}${taskArgs ? ` \\\n${taskArgs}` : ""}${benchArgs ? ` \\\n${benchArgs}` : ""}
 
 bash "$PWD/.skilllens/experiments/${experimentName}/run-original.sh"
 REMOTE_SKILLSCOPE
@@ -2596,6 +2680,18 @@ function parseArgs(args: string[]): CliOptions {
         options.skillsbenchRoot = next;
         index += 1;
         break;
+      case "dataset":
+        options.dataset = next;
+        index += 1;
+        break;
+      case "prebuilt-task-env":
+        options.prebuiltTaskEnv = next;
+        index += 1;
+        break;
+      case "prebuilt-skillsbench-ghcr":
+        options.dataset = options.dataset ?? "skillsbench@1.1";
+        options.prebuiltTaskEnv = options.prebuiltTaskEnv ?? defaultSkillsBenchPrebuiltTemplate;
+        break;
       case "runs-root":
         options.runsRoot = next;
         index += 1;
@@ -2916,6 +3012,10 @@ function shellQuoteIfNeeded(value: string): string {
   return /^--[a-z0-9-]+$/i.test(value) ? value : shellQuote(value);
 }
 
+function tomlString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+}
+
 function escapeCell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
@@ -2938,9 +3038,14 @@ function printUsage() {
   npm run skillsbench -- rerun-plan --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --optimized-skills-root .skilllens/experiments/sb-codex-gpt55/optimized-skills --out .skilllens/experiments/sb-codex-gpt55
   npm run skillsbench -- analysis-plan --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --optimized-skills-root .skilllens/experiments/sb-codex-gpt55/optimized-skills --out .skilllens/experiments/sb-codex-gpt55/optimized-analysis
   npm run skillsbench -- remote-script --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --out .skilllens/experiments/sb-codex-gpt55
+  npm run skillsbench -- plan --skillsbench-root .skilllens/vendor/skillsbench --prebuilt-skillsbench-ghcr --task weighted-gdp-calc
 
 Options:
   --skillsbench-root       Local SkillsBench checkout. Supports GitHub layout with tasks/ or HF mirror layout.
+  --dataset                BenchFlow registry dataset, e.g. skillsbench@1.1. Still needs --skillsbench-root for local skill/task text.
+  --prebuilt-skillsbench-ghcr
+                            Use ghcr.io/benchflow-ai/skillsbench-task-env:standard-v1-{task} and skillsbench@1.1.
+  --prebuilt-task-env      Image template for per-task environment manifests. Supports {task}, \${task}, or %TASK%.
   --runs-root              Directory containing BenchFlow trial artifacts.
   --agent                  BenchFlow agent name. Default: codex.
   --model                  BenchFlow model name. Default: gpt-5.5.

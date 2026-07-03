@@ -68,18 +68,67 @@ SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
   bash .skilllens/experiments/skillsbench-codex-gpt55/run-original.sh
 ```
 
-### Remote machine Docker runner
+### Prebuilt task environments
 
-For the 87-task run, prefer running the whole experiment on a remote machine if
-Docker builds are the bottleneck. Do not rely on `DOCKER_HOST=ssh://...` unless
-the remote daemon can see the exact same build-context paths, because BenchFlow
-creates temporary compose directories during sandbox setup.
+SkillsBench publishes per-task Docker environment images at:
 
-SkillsBench does not provide one shared prebuilt image for the 87-task Docker
-suite. "Remote Docker" here means the remote machine's local Docker daemon, not
-a remote image registry. The default tasks each ship an `environment/Dockerfile`;
-the remote runner moves those per-task builds to the remote host and lets the
-remote Docker layer cache absorb repeated work.
+```text
+ghcr.io/benchflow-ai/skillsbench-task-env:standard-v1-<task-id>
+```
+
+There is no single shared image for all 87 tasks, but the default one-skill
+tasks we use for smoke experiments have matching `standard-v1-*` tags. Use the
+prebuilt plan mode to make SkillScope generate one BenchFlow
+`--environment-manifest` per task:
+
+```bash
+npm run skillsbench -- plan \
+  --skillsbench-root .skilllens/vendor/skillsbench \
+  --out .skilllens/experiments/skillsbench-codex-gpt55 \
+  --agent codex \
+  --model gpt-5.5 \
+  --trials 1 \
+  --task weighted-gdp-calc \
+  --prebuilt-skillsbench-ghcr \
+  --bench-arg --usage-tracking \
+  --bench-arg off
+```
+
+This uses the pinned BenchFlow dataset registry (`-d skillsbench@1.1`) for task
+execution and the local SkillsBench checkout for skill text, task metadata, and
+optimized skill copies.
+
+Optionally warm the Docker cache:
+
+```bash
+bash .skilllens/experiments/skillsbench-codex-gpt55/pull-prebuilt-images.sh
+```
+
+Then run the generated script normally:
+
+```bash
+bash .skilllens/experiments/skillsbench-codex-gpt55/run-original.sh
+```
+
+Important details:
+
+- `-d skillsbench@1.1` alone still lets BenchFlow build task Dockerfiles.
+- Prebuilt images are selected by `--environment-manifest`, not by
+  `--config-override`.
+- Because the manifest names one image, keep the generated worker commands
+  one-task-at-a-time. This matches the single-instance SkillScope loop.
+
+### Remote machine runner
+
+For a larger run, prefer running the whole experiment on a remote machine if
+local Docker or bandwidth is the bottleneck. Do not rely on
+`DOCKER_HOST=ssh://...` unless the remote daemon can see the exact same
+build-context paths, because BenchFlow creates temporary compose directories
+during sandbox setup.
+
+When the run plan was generated with `--prebuilt-skillsbench-ghcr`, the remote
+runner also regenerates those per-task manifests on the remote host and pulls
+the same GHCR task images there.
 
 Generate a remote runner:
 

@@ -178,7 +178,7 @@ npm run cia:audit
 SkillsBench Codex/GPT-5.5 experiment control:
 
 ```bash
-npm run skillsbench -- plan --skillsbench-root /path/to/skillsbench --trials 3
+npm run skillsbench -- plan --skillsbench-root /path/to/skillsbench --prebuilt-skillsbench-ghcr --trials 3
 ```
 
 See [docs/skillsbench-experiment.md](docs/skillsbench-experiment.md).
@@ -234,10 +234,11 @@ npm run skillsbench -- plan \
   --model gpt-5.5 \
   --trials 1 \
   --task <task-id> \
-  --bench-arg --sandbox \
-  --bench-arg docker \
+  --prebuilt-skillsbench-ghcr \
   --bench-arg --usage-tracking \
   --bench-arg off
+
+bash .skilllens/experiments/<slug>/original/pull-prebuilt-images.sh
 
 SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
 SKILLSCOPE_SKIP_FAILED=1 \
@@ -258,6 +259,15 @@ npm run skillsbench -- judge \
 Only optimize when native verifier failed, or selected-skill SkillScope non-compliance is high, or final/artifact constraints were violated or ignored. If native passes and NC is low, record pass-through and do not rewrite.
 
 中文：只有 native verifier 失败、选中 skill 的 NC 高、或 final/artifact 约束被违反/忽略时才优化。native 已通过且 NC 低的实例直接 pass-through，不改 skill。
+
+`--prebuilt-skillsbench-ghcr` uses `skillsbench@1.1` plus per-task GHCR images
+such as `ghcr.io/benchflow-ai/skillsbench-task-env:standard-v1-<task>`, so the
+generated BenchFlow command pulls an environment image instead of rebuilding
+that task Dockerfile locally.
+
+中文：`--prebuilt-skillsbench-ghcr` 会使用 `skillsbench@1.1` 和按 task 切分的
+GHCR 镜像，生成的 BenchFlow 命令会拉取环境镜像，而不是每次本地构建该 task 的
+Dockerfile。
 
 Then generate exactly one optimized skill and rerun:
 

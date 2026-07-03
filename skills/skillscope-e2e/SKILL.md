@@ -100,11 +100,15 @@ npm run skillsbench -- plan \
   --model gpt-5.5 \
   --trials 1 \
   --task <task-id> \
-  --bench-arg --sandbox \
-  --bench-arg docker \
+  --prebuilt-skillsbench-ghcr \
   --bench-arg --usage-tracking \
   --bench-arg off
 ```
+
+Use `--prebuilt-skillsbench-ghcr` when the task has a matching
+`ghcr.io/benchflow-ai/skillsbench-task-env:standard-v1-<task-id>` image. It
+generates one `--environment-manifest` for the selected task and keeps the local
+checkout as the source of skill text for SkillScope analysis.
 
 Use `trials=1` for the first optimization loop. Increase trials only after the single-instance loop is stable.
 
@@ -113,6 +117,8 @@ Use `trials=1` for the first optimization loop. Increase trials only after the s
 Run the original with-skill trial:
 
 ```bash
+bash .skilllens/experiments/<slug>/original/pull-prebuilt-images.sh
+
 SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
 SKILLSCOPE_SKIP_FAILED=1 \
   bash .skilllens/experiments/<slug>/original/run-original.sh
