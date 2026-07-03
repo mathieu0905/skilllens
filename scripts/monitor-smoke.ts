@@ -66,6 +66,7 @@ const baseEvidenceFeatures = [
   "active-job-card",
   "primary-stop-action",
   "job-source-context",
+  "job-source-command-clamp",
   "job-card-latest-clamp",
   "job-runtime-display",
   "artifact-copy-actions",
@@ -154,6 +155,26 @@ async function main() {
       await browser.waitForText("Copy cwd", 15000);
       await browser.waitForText("Copy command", 15000);
       await captureEvidence(browser, "02ab-job-source-context-visible.png", "job-source-context", "job detail shows the working directory and command before the technical process tree");
+      const commandPreview = await browser.evaluate(`
+        (() => {
+          const commandBlock = [...document.querySelectorAll('.job-path-action')]
+            .find((node) => (node.querySelector('span')?.textContent || '').trim().toLowerCase() === 'command');
+          const code = commandBlock?.querySelector('code');
+          const copyButton = commandBlock?.querySelector('button');
+          if (!code || !copyButton) return { ok: false, reason: 'missing command block' };
+          const style = window.getComputedStyle(code);
+          const lineHeight = Number.parseFloat(style.lineHeight || '0') || 16;
+          return {
+            ok: code.clientHeight <= (lineHeight * 4.8) && (copyButton.textContent || '').includes('Copy command'),
+            height: code.clientHeight,
+            lineHeight,
+            text: code.textContent,
+            button: copyButton.textContent
+          };
+        })()
+      `);
+      assert(commandPreview.result?.value?.ok === true, `command source preview should stay compact and copyable: ${JSON.stringify(commandPreview.result?.value)}`);
+      await captureEvidence(browser, "02aba-job-source-command-clamped.png", "job-source-command-clamp", "long source commands are clamped in the detail while the full command remains copyable");
       await browser.waitForText("readable trace update", 15000);
       const latestPreview = await browser.evaluate(`
         (() => {

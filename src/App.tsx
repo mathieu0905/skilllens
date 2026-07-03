@@ -4174,7 +4174,7 @@ function JobDetail({
             <div className="job-source-summary">
               <JobPathAction label="Working directory" value={sourceProcess.cwd} copied={copiedValue === sourceProcess.cwd} onCopy={() => void copyValue(sourceProcess.cwd)} copyLabel="Copy cwd" />
               {sourceCommand ? (
-                <JobPathAction label="Command" value={sourceCommand} copied={copiedValue === sourceCommand} onCopy={() => void copyValue(sourceCommand)} copyLabel="Copy command" />
+                <JobPathAction label="Command" value={sourceCommand} copied={copiedValue === sourceCommand} onCopy={() => void copyValue(sourceCommand)} copyLabel="Copy command" clampValue />
               ) : null}
             </div>
           ) : null}
@@ -4274,7 +4274,8 @@ function JobPathAction({
   copied,
   onCopy,
   compact,
-  copyLabel = "Copy path"
+  copyLabel = "Copy path",
+  clampValue
 }: {
   label: string;
   value: string;
@@ -4282,9 +4283,11 @@ function JobPathAction({
   onCopy: () => void;
   compact?: boolean;
   copyLabel?: string;
+  clampValue?: boolean;
 }) {
+  const className = `job-path-action${compact ? " compact" : ""}${clampValue ? " clamped" : ""}`;
   return (
-    <div className={compact ? "job-path-action compact" : "job-path-action"}>
+    <div className={className}>
       <div>
         <span>{label}</span>
         <code>{value}</code>

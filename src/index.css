@@ -2823,6 +2823,13 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.job-path-action.clamped code {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .job-path-action .secondary-button {
   min-width: 102px;
   justify-content: center;
