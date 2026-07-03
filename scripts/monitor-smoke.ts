@@ -79,6 +79,7 @@ const baseEvidenceFeatures = [
   "job-progress-and-artifact-tail",
   "safe-stop-preview",
   "safe-stop-result",
+  "stop-result-copy",
   "stopped-job-focused",
   "artifact-readable-label",
   "recent-history",
@@ -229,6 +230,18 @@ async function main() {
       await clickEnabledButton(browser, "Execute stop", 15000);
       await browser.waitForText("Stop result", 45000);
       await captureEvidence(browser, "05-stop-result-visible.png", "safe-stop-result", "stop result shows killed processes, removed containers, residual checks, and cleanup errors");
+      const copiedResult = await browser.evaluate(`
+        (() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((item) => (item.textContent || '').includes('Copy result'));
+          button?.scrollIntoView({ block: 'center' });
+          button?.click();
+          return Boolean(button);
+        })()
+      `);
+      assert(copiedResult.result?.value === true, "copy result button should be visible");
+      await browser.waitForText("Copied result", 15000);
+      await captureEvidence(browser, "05a-stop-result-copy.png", "stop-result-copy", "stop result summary can be copied for reports or follow-up prompts");
       const stoppedFocus = await browser.evaluate(`
         (() => {
           const input = document.querySelector('input[aria-label="Search jobs"]');

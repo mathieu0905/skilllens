@@ -2944,6 +2944,22 @@ textarea {
   font-size: 13px;
 }
 
+.stop-plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.stop-plan-head strong {
+  margin-bottom: 0;
+}
+
+.stop-plan-head .secondary-button {
+  min-height: 30px;
+}
+
 .stop-plan p {
   margin: 4px 0;
   color: #405065;

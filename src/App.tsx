@@ -3767,9 +3767,6 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         throw new Error(`HTTP ${response.status}: ${await response.text()}`);
       }
       const payload = (await response.json()) as { job?: AgentJob; stopPlan?: AgentStopPlan; stopResult?: AgentStopResult };
-      if (payload.job) {
-        setJobs((current) => [payload.job!, ...current.filter((item) => item.id !== payload.job!.id)]);
-      }
       if (payload.stopPlan) {
         setStopPlans((current) => ({ ...current, [job.id]: payload.stopPlan! }));
       }
@@ -3777,9 +3774,11 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         setStopResults((current) => ({ ...current, [job.id]: payload.stopResult! }));
         setStopNotice(`Stop result: ${stopResultSummary(payload.stopResult)}`);
       }
+      const focusedJob = payload.job ?? (payload.stopResult ? stoppedJobFromResult(job, payload.stopResult, payload.stopPlan) : job);
+      setJobs((current) => [focusedJob, ...current.filter((item) => item.id !== focusedJob.id)]);
       setFilter("recent");
-      setQuery(jobFocusQuery(payload.job ?? job));
-      setSelectedJobId(job.id);
+      setQuery(jobFocusQuery(focusedJob));
+      setSelectedJobId(focusedJob.id);
     } catch (stopFailure) {
       setStopError(stopFailure instanceof Error ? stopFailure.message : "Failed to stop job.");
     } finally {
@@ -4170,7 +4169,13 @@ function JobDetail({
         ) : null}
       </div>
       {stopPlan ? <StopPlanView plan={stopPlan} /> : null}
-      {stopResult ? <StopResultView result={stopResult} /> : null}
+      {stopResult ? (
+        <StopResultView
+          result={stopResult}
+          copied={copiedValue === `stop-result:${stopResult.jobId}`}
+          onCopy={() => void copyValue(stopResultCopyText(stopResult), `stop-result:${stopResult.jobId}`)}
+        />
+      ) : null}
       {sourceProcess || primaryArtifact || job.historyPath ? (
         <div className="job-detail-summary job-detail-context">
           {sourceProcess ? (
@@ -4347,14 +4352,20 @@ function StopPlanView({ plan }: { plan: AgentStopPlan }) {
   );
 }
 
-function StopResultView({ result }: { result: AgentStopResult }) {
+function StopResultView({ result, copied, onCopy }: { result: AgentStopResult; copied: boolean; onCopy: () => void }) {
   const residualProcesses = result.residualProcesses ?? [];
   const residualContainers = result.residualContainers ?? [];
   const killed = result.killedProcesses.filter((item) => item.ok).length;
   const removed = result.removedContainers.filter((item) => item.ok).length;
   return (
     <div className="stop-plan result">
-      <strong>Stop result</strong>
+      <div className="stop-plan-head">
+        <strong>Stop result</strong>
+        <button className="secondary-button" onClick={onCopy}>
+          <Copy size={14} />
+          {copied ? "Copied result" : "Copy result"}
+        </button>
+      </div>
       <p className={result.cleanupErrors.length ? "stop-result-summary failed" : "stop-result-summary success"}>{stopResultSummary(result)}</p>
       <div className="stop-result-grid">
         <div>
@@ -4557,6 +4568,24 @@ function stopResultSummary(result: AgentStopResult): string {
   const killed = result.killedProcesses.filter((item) => item.ok).length;
   const removed = result.removedContainers.filter((item) => item.ok).length;
   return `Clean stop: ${killed} process target${killed === 1 ? "" : "s"} and ${removed} container${removed === 1 ? "" : "s"} handled.`;
+}
+
+function stopResultCopyText(result: AgentStopResult): string {
+  const residualProcesses = result.residualProcesses ?? [];
+  const residualContainers = result.residualContainers ?? [];
+  const killed = result.killedProcesses.filter((item) => item.ok).length;
+  const removed = result.removedContainers.filter((item) => item.ok).length;
+  return [
+    `Job: ${result.jobId}`,
+    `Requested: ${result.requestedAt}`,
+    `Signal: ${result.signal}`,
+    stopResultSummary(result),
+    `Processes stopped: ${killed}/${result.killedProcesses.length}`,
+    `Containers removed: ${removed}/${result.removedContainers.length}`,
+    `Residual processes: ${residualProcesses.length ? residualProcesses.map((item) => item.pgid ? `pgid ${item.pgid}` : `pid ${item.pid}`).join(", ") : "none"}`,
+    `Residual containers: ${residualContainers.length ? residualContainers.join(", ") : "none"}`,
+    `Cleanup errors: ${result.cleanupErrors.length ? result.cleanupErrors.join("; ") : "none"}`
+  ].join("\n");
 }
 
 function JobProgress({ progress }: { progress: AgentJobProgress }) {
@@ -5290,6 +5319,17 @@ function jobSearchText(job: AgentJob): string {
 
 function jobFocusQuery(job: AgentJob): string {
   return job.historyPath ?? job.artifacts[0]?.path ?? job.title;
+}
+
+function stoppedJobFromResult(job: AgentJob, stopResult: AgentStopResult, stopPlan?: AgentStopPlan): AgentJob {
+  return {
+    ...job,
+    status: stopResult.cleanupErrors.length ? "failed" : "stopped",
+    lastUpdatedAt: stopResult.requestedAt,
+    canStop: false,
+    stopPlan: stopPlan ?? job.stopPlan,
+    lastStopResult: stopResult
+  };
 }
 
 function compareJobs(left: AgentJob, right: AgentJob, sort: JobSort): number {
