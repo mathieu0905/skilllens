@@ -3845,30 +3845,37 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         </div>
         <div className="job-card-grid">
           {filteredJobs.length ? (
-            filteredJobs.map((job) => (
-              <button
-                className={selectedJob?.id === job.id ? `agent-process-group job-card selected ${job.status}` : `agent-process-group job-card ${job.status}`}
-                key={job.id}
-                onClick={() => setSelectedJobId(job.id)}
-              >
-                <div className="job-card-head">
-                  <div>
-                    <strong>{job.title}</strong>
-                    <span>{job.agentRoot?.label ?? job.agentRoot?.command ?? "agent"} · {formatJobRuntime(job.startedAt, job.lastUpdatedAt)}</span>
+            filteredJobs.map((job) => {
+              const progress = progressWithTail(job, artifactTails);
+              return (
+                <button
+                  className={selectedJob?.id === job.id ? `agent-process-group job-card selected ${job.status}` : `agent-process-group job-card ${job.status}`}
+                  key={job.id}
+                  onClick={() => setSelectedJobId(job.id)}
+                >
+                  <div className="job-card-head">
+                    <div>
+                      <strong>{job.title}</strong>
+                      <span>{job.agentRoot?.label ?? job.agentRoot?.command ?? "agent"} · {formatJobRuntime(job.startedAt, job.lastUpdatedAt)}</span>
+                    </div>
+                    <span className={`job-status ${job.status}`}>{jobStatusLabel(job)}</span>
                   </div>
-                  <span className={`job-status ${job.status}`}>{job.status}</span>
-                </div>
-                <JobProgress progress={progressWithTail(job, artifactTails)} />
-                <p>{progressWithTail(job, artifactTails).detail}</p>
-                <div className="job-card-meta">
-                  <span>{job.processes.length} proc</span>
-                  <span>{job.artifacts.length} artifacts</span>
-                  <span>{job.containers.length} containers</span>
-                  <span>{formatStaleAge(job.staleSeconds)}</span>
-                </div>
-                {job.containers.length ? <small>docker {job.containers.map((container) => container.name).join(", ")}</small> : null}
-              </button>
-            ))
+                  <p className={`job-card-reason ${jobAttentionTone(job)}`}>{jobAttentionReason(job, progress)}</p>
+                  <JobProgress progress={progress} />
+                  <div className="job-card-latest">
+                    <span>Latest</span>
+                    <p>{progress.latestLine ?? progress.detail}</p>
+                  </div>
+                  <div className="job-card-meta">
+                    <span>{job.processes.length} proc</span>
+                    <span>{job.artifacts.length} artifacts</span>
+                    <span>{job.containers.length} containers</span>
+                    <span>{formatStaleAge(job.staleSeconds)}</span>
+                  </div>
+                  {job.containers.length ? <small>docker {job.containers.map((container) => container.name).join(", ")}</small> : null}
+                </button>
+              );
+            })
           ) : (
             <JobEmptyState
               filter={filter}
@@ -4135,12 +4142,46 @@ function JobDetail({
 }
 
 function StopPlanView({ plan }: { plan: AgentStopPlan }) {
+  const processTargets = plan.processTargets.map((target) => ({
+    key: target.pgid ? `pgid-${target.pgid}` : `pid-${target.pid ?? target.command}`,
+    label: target.pgid ? `Process group ${target.pgid}` : `Process ${target.pid ?? "unknown"}`,
+    detail: `${target.command} · ${target.reason}`
+  }));
+  const containerTargets = plan.containers.map((container) => ({
+    key: `container-${container.name}`,
+    label: container.name,
+    detail: container.project ? `Docker container · compose project ${container.project}` : "Docker container"
+  }));
+  const willStop = [...processTargets, ...containerTargets];
   return (
     <div className="stop-plan">
       <strong>Stop preview</strong>
-      {plan.protectedRoot ? <p>Protected root: pid {plan.protectedRoot.pid ?? "?"} · {plan.protectedRoot.reason}</p> : null}
-      <p>Processes: {plan.processTargets.length ? plan.processTargets.map((target) => target.pgid ? `pgid ${target.pgid}` : `pid ${target.pid}`).join(", ") : "none"}</p>
-      <p>Containers: {plan.containers.length ? plan.containers.map((container) => container.name).join(", ") : "none"}</p>
+      <div className="stop-preview-grid">
+        <div>
+          <span>Will stop</span>
+          {willStop.length ? (
+            willStop.map((item) => (
+              <p key={item.key}>
+                <b>{item.label}</b>
+                <small>{item.detail}</small>
+              </p>
+            ))
+          ) : (
+            <p>No child process group or container will be stopped.</p>
+          )}
+        </div>
+        <div>
+          <span>Will not touch</span>
+          {plan.protectedRoot ? (
+            <p>
+              <b>{plan.protectedRoot.label ?? `Root pid ${plan.protectedRoot.pid ?? "?"}`}</b>
+              <small>Codex/Claude root agent stays protected.</small>
+            </p>
+          ) : (
+            <p>No root agent process was detected.</p>
+          )}
+        </div>
+      </div>
       {plan.warnings.map((warning) => <p className="error-text" key={warning}>{warning}</p>)}
     </div>
   );
@@ -4221,6 +4262,40 @@ function jobStatusMessage(job: AgentJob): string {
     return "Stop or cleanup left errors. Check residual processes and containers below.";
   }
   return "Completed or no longer active. History and artifacts are kept here.";
+}
+
+function jobAttentionTone(job: AgentJob): "normal" | "warn" | "danger" | "success" {
+  if (job.status === "failed") {
+    return "danger";
+  }
+  if (job.status === "stale") {
+    return "warn";
+  }
+  if (job.status === "stopped") {
+    return "success";
+  }
+  return "normal";
+}
+
+function jobAttentionReason(job: AgentJob, progress: AgentJobProgress): string {
+  if (job.status === "failed") {
+    return job.lastStopResult?.cleanupErrors.length
+      ? `${job.lastStopResult.cleanupErrors.length} cleanup issue${job.lastStopResult.cleanupErrors.length === 1 ? "" : "s"} need review.`
+      : "The job ended with a failure signal; inspect stop result and residuals.";
+  }
+  if (job.status === "stale") {
+    return `No new output for ${formatStaleAge(job.staleSeconds)}. The task may be blocked, but it has not been stopped.`;
+  }
+  if (job.status === "stopped") {
+    return job.lastStopResult ? stopResultSummary(job.lastStopResult) : "Stopped safely and saved to Recent history.";
+  }
+  if (job.containers.length) {
+    return `${job.containers.length} Docker container${job.containers.length === 1 ? "" : "s"} attached to this job.`;
+  }
+  if (progress.percent !== undefined) {
+    return `Progress is visible: ${Math.round(progress.percent)}% inferred from artifacts.`;
+  }
+  return "Live job with output and artifacts grouped for review.";
 }
 
 function stopPlanSummary(plan: AgentStopPlan): string {
@@ -4962,11 +5037,16 @@ function progressWithTail(job: AgentJob, artifactTails: Record<string, TraceTail
     .filter((tail): tail is TraceTailState => Boolean(tail?.content))
     .map((tail) => tail.content);
   if (!contents.length) {
-    return job.progress;
+    return {
+      ...job.progress,
+      detail: cleanJobOutputLine(job.progress.detail) || job.progress.detail,
+      latestLine: job.progress.latestLine ? cleanJobOutputLine(job.progress.latestLine) : undefined
+    };
   }
   const content = contents.join("\n");
   const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const latestLine = lines[lines.length - 1] ?? job.progress.latestLine;
+  const latestLine = cleanJobOutputLine(lines[lines.length - 1] ?? job.progress.latestLine ?? "");
+  const fallbackDetail = cleanJobOutputLine(job.progress.detail) || job.progress.detail;
   const stepMatches = Array.from(content.matchAll(/\bstep[-_ ]?(\d+)(?:\s*\/\s*(\d+))?\b/gi));
   const latestStep = stepMatches[stepMatches.length - 1];
   if (latestStep) {
@@ -4974,7 +5054,7 @@ function progressWithTail(job: AgentJob, artifactTails: Record<string, TraceTail
     const total = latestStep[2] ? Number(latestStep[2]) : undefined;
     return {
       label: `step ${current}${total ? `/${total}` : ""}`,
-      detail: latestLine || job.progress.detail,
+      detail: latestLine || fallbackDetail,
       percent: total ? Math.min(100, Math.max(0, (current / total) * 100)) : undefined,
       updatedAt: job.progress.updatedAt,
       latestLine
@@ -4982,10 +5062,85 @@ function progressWithTail(job: AgentJob, artifactTails: Record<string, TraceTail
   }
   return {
     label: `${lines.length} updates`,
-    detail: latestLine || job.progress.detail,
+    detail: latestLine || fallbackDetail,
     updatedAt: job.progress.updatedAt,
     latestLine
   };
+}
+
+function cleanJobOutputLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+    return truncate(trimmed.replace(/\s+/g, " "), 160);
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return summarizeTraceJson(parsed) ?? truncate(trimmed.replace(/\s+/g, " "), 160);
+  } catch {
+    return truncate(trimmed.replace(/\s+/g, " "), 160);
+  }
+}
+
+function summarizeTraceJson(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    return value.map(summarizeTraceJson).find(Boolean) ?? null;
+  }
+  const record = value as Record<string, unknown>;
+  const type = stringField(record, "type") ?? stringField(record, "event") ?? stringField(record, "kind");
+  const name = stringField(record, "name") ?? stringField(record, "tool_name") ?? stringField(record, "command");
+  const text =
+    stringField(record, "message") ??
+    stringField(record, "msg") ??
+    stringField(record, "text") ??
+    stringField(record, "summary") ??
+    stringField(record, "content") ??
+    stringField(record, "delta") ??
+    nestedTraceText(record);
+  if (text) {
+    const prefix = type ? `${humanizeTraceType(type)}: ` : "";
+    return truncate(`${prefix}${text.replace(/\s+/g, " ")}`, 160);
+  }
+  if (type && name) {
+    return truncate(`${humanizeTraceType(type)}: ${name}`, 160);
+  }
+  return type ? humanizeTraceType(type) : null;
+}
+
+function nestedTraceText(record: Record<string, unknown>): string | null {
+  for (const key of ["payload", "item", "data", "result"]) {
+    const value = record[key];
+    if (!value || typeof value !== "object") {
+      continue;
+    }
+    const nested = summarizeTraceJson(value);
+    if (nested) {
+      return nested;
+    }
+  }
+  const content = record.content;
+  if (Array.isArray(content)) {
+    return content.map(summarizeTraceJson).find(Boolean) ?? null;
+  }
+  return null;
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function humanizeTraceType(value: string): string {
+  return value
+    .replace(/[_./-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function formatJobRuntime(startedAt: string, lastUpdatedAt: string): string {

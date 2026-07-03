@@ -2555,6 +2555,54 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.job-card-reason {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 8px 9px;
+  color: #405065;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.job-card-reason.warn {
+  border-color: #f3c780;
+  background: #fff8eb;
+  color: #8a4b00;
+}
+
+.job-card-reason.danger {
+  border-color: #f2b8b5;
+  background: #fff5f5;
+  color: #9b2c2c;
+}
+
+.job-card-reason.success {
+  border-color: #b8d9c2;
+  background: #f3fbf6;
+  color: #1f6b3a;
+}
+
+.job-card-latest {
+  margin-top: 9px;
+}
+
+.job-card-latest span {
+  display: block;
+  color: #66778a;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.job-card-latest p {
+  margin-top: 3px;
+  color: #243246;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .job-card-meta {
   margin-top: 9px;
   flex-wrap: wrap;
@@ -2699,6 +2747,47 @@ textarea {
   color: #405065;
   font-size: 12px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.stop-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stop-preview-grid > div {
+  min-width: 0;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px;
+}
+
+.stop-preview-grid span {
+  display: block;
+  margin-bottom: 6px;
+  color: #66778a;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.stop-preview-grid b,
+.stop-preview-grid small {
+  display: block;
+}
+
+.stop-preview-grid b {
+  color: #17202a;
+  font-size: 12px;
+}
+
+.stop-preview-grid small {
+  margin-top: 2px;
+  color: #66778a;
+  font-size: 11px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
@@ -3670,5 +3759,9 @@ textarea {
   .job-live-controls {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .stop-preview-grid {
+    grid-template-columns: 1fr;
   }
 }
