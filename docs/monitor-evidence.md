@@ -3,6 +3,17 @@
 Run the screenshot-backed monitor verification with:
 
 ```bash
+npm run monitor:verify
+npm run monitor:verify:docker
+```
+
+These commands start a temporary local Vite server, run the smoke flow, validate
+the generated evidence manifest, print the screenshot report path, and then stop
+the server.
+
+For a server you already started yourself, run the lower-level commands directly:
+
+```bash
 npm run monitor:smoke
 npm run monitor:smoke:docker
 npm run monitor:evidence:check

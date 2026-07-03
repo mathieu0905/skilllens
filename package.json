@@ -26,6 +26,8 @@
     "monitor:smoke:docker": "tsx scripts/monitor-smoke.ts --docker",
     "monitor:evidence:check": "tsx scripts/monitor-evidence-check.ts",
     "monitor:evidence:check:docker": "tsx scripts/monitor-evidence-check.ts --docker",
+    "monitor:verify": "tsx scripts/monitor-verify.ts",
+    "monitor:verify:docker": "tsx scripts/monitor-verify.ts --docker",
     "install:codex-prompt": "tsx scripts/install-codex-prompt.ts"
   },
   "dependencies": {
