@@ -3811,10 +3811,10 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
           </div>
         ) : null}
         <div className="job-metrics">
-          <JobMetric label="active jobs" value={metrics.active} tone="active" active={filter === "active"} onClick={() => setFilter("active")} />
-          <JobMetric label="needs attention" value={metrics.issues} tone={metrics.issues ? "warn" : "normal"} active={filter === "issues"} onClick={() => setFilter("issues")} />
-          <JobMetric label="containers" value={metrics.containers} tone="normal" active={filter === "docker"} onClick={() => setFilter("docker")} />
-          <JobMetric label="cleanup issues" value={metrics.failures} tone={metrics.failures ? "danger" : "normal"} active={false} onClick={() => setFilter("issues")} />
+          <JobMetric label="active jobs" detail="running now" value={metrics.active} tone="active" active={filter === "active"} onClick={() => setFilter("active")} />
+          <JobMetric label="stale jobs" detail="quiet >30s" value={metrics.stale} tone={metrics.stale ? "warn" : "normal"} active={filter === "stale"} onClick={() => setFilter("stale")} />
+          <JobMetric label="containers" detail="attached total" value={metrics.containers} tone="normal" active={filter === "docker"} onClick={() => setFilter("docker")} />
+          <JobMetric label="recent failures" detail="cleanup errors" value={metrics.failures} tone={metrics.failures ? "danger" : "normal"} active={filter === "issues"} onClick={() => setFilter("issues")} />
         </div>
         <div className="job-filter-row" role="tablist" aria-label="Job filters">
           {(["active", "issues", "recent", "stale", "docker"] as const).map((item) => (
@@ -4045,12 +4045,14 @@ function JobDetailEmpty({
 
 function JobMetric({
   label,
+  detail,
   value,
   tone,
   active,
   onClick
 }: {
   label: string;
+  detail: string;
   value: number;
   tone: "active" | "warn" | "danger" | "normal";
   active: boolean;
@@ -4060,6 +4062,7 @@ function JobMetric({
     <button className={active ? `job-metric ${tone} selected` : `job-metric ${tone}`} onClick={onClick}>
       <span>{label}</span>
       <strong>{value}</strong>
+      <small>{detail}</small>
     </button>
   );
 }

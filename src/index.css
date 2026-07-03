@@ -2418,6 +2418,14 @@ textarea {
   line-height: 1;
 }
 
+.job-metric small {
+  display: block;
+  margin-top: 5px;
+  color: #66778a;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
 .job-metric.active strong {
   color: #1967d2;
 }

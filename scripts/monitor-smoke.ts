@@ -62,6 +62,7 @@ const includeDockerEvidence = process.argv.includes("--docker");
 const baseEvidenceFeatures = [
   "job-room-shell",
   "job-room-task-language",
+  "top-metrics-state",
   "job-list-summary",
   "active-job-card",
   "primary-stop-action",
@@ -126,6 +127,19 @@ async function main() {
       await browser.waitForText("任务控制室", 15000);
       await browser.waitForText("长任务", 15000);
       await captureEvidence(browser, "01aa-job-room-task-language.png", "job-room-task-language", "the monitor entry and header describe jobs, artifacts, containers, and safe-stop results instead of raw processes");
+      await browser.waitForText("stale jobs", 15000);
+      await browser.waitForText("recent failures", 15000);
+      const metricsVisible = await browser.evaluate(`
+        (() => {
+          const text = [...document.querySelectorAll('.job-metric')]
+            .map((node) => node.textContent || '')
+            .join('\\n');
+          return ['active jobs', 'running now', 'stale jobs', 'quiet >30s', 'containers', 'attached total', 'recent failures', 'cleanup errors']
+            .every((item) => text.includes(item));
+        })()
+      `);
+      assert(metricsVisible.result?.value === true, "top metrics should label active, stale, containers, and recent failures clearly");
+      await captureEvidence(browser, "01ab-top-metrics-state.png", "top-metrics-state", "top metrics show active jobs, stale jobs, containers, and recent failures with short meaning labels");
       await browser.waitForText("fake-codex-output.log", 30000);
       await browser.waitForText("Showing", 15000);
       await captureEvidence(browser, "01a-job-list-summary-visible.png", "job-list-summary", "job list summary explains the current filter, result count, sort order, and refresh state");
