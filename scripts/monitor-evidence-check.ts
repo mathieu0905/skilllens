@@ -24,6 +24,7 @@ const baseEvidenceFeatures = [
   "job-room-shell",
   "job-list-summary",
   "active-job-card",
+  "job-runtime-display",
   "artifact-copy-actions",
   "job-search",
   "job-search-clear",

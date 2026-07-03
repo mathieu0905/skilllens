@@ -63,6 +63,7 @@ const baseEvidenceFeatures = [
   "job-room-shell",
   "job-list-summary",
   "active-job-card",
+  "job-runtime-display",
   "artifact-copy-actions",
   "job-search",
   "job-search-clear",
@@ -127,6 +128,8 @@ async function main() {
         })()
       `);
       await captureEvidence(browser, "02-active-job-card-appears.png", "active-job-card", "active job card shows title, status, process/artifact/container counts, and selected detail");
+      await browser.waitForText("runtime", 15000);
+      await captureEvidence(browser, "02a-runtime-display-visible.png", "job-runtime-display", "active and stale jobs show wall-clock runtime instead of last-update age");
       await verifySearchSortAndLiveControls(browser);
       await browser.waitForText("fake-codex-smoke-step", 30000);
       await captureEvidence(browser, "03-job-progress-live.png", "job-progress-and-artifact-tail", "progress and artifact tail update from the live job log");

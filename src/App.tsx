@@ -3873,7 +3873,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
                   <div className="job-card-head">
                     <div>
                       <strong>{job.title}</strong>
-                      <span>{job.agentRoot?.label ?? job.agentRoot?.command ?? "agent"} · {formatJobRuntime(job.startedAt, job.lastUpdatedAt)}</span>
+                      <span>{job.agentRoot?.label ?? job.agentRoot?.command ?? "agent"} · runtime {formatJobRuntimeForJob(job)}</span>
                     </div>
                     <span className={`job-status ${job.status}`}>{jobStatusLabel(job)}</span>
                   </div>
@@ -4130,7 +4130,7 @@ function JobDetail({
       </div>
       <div className="job-detail-summary">
         <span>{job.agentRoot?.label ?? "agent root unknown"} is protected</span>
-        <span>Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
+        <span>Runtime {formatJobRuntimeForJob(job)} · Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
         {primaryArtifact ? (
           <JobPathAction label="Primary artifact" value={primaryArtifact.path} copied={copiedValue === primaryArtifact.path} onCopy={() => void copyValue(primaryArtifact.path)} />
         ) : null}
@@ -5263,8 +5263,12 @@ function jobAttentionScore(job: AgentJob): number {
 
 function jobRuntimeMs(job: AgentJob): number {
   const start = Date.parse(job.startedAt);
-  const end = Date.parse(job.lastUpdatedAt);
+  const end = Date.parse(jobRuntimeEndAt(job));
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
+}
+
+function jobRuntimeEndAt(job: AgentJob): string {
+  return job.status === "active" || job.status === "stale" ? new Date().toISOString() : job.lastUpdatedAt;
 }
 
 function formatStaleAge(seconds: number): string {
@@ -5420,6 +5424,10 @@ function formatJobRuntime(startedAt: string, lastUpdatedAt: string): string {
     return `${minutes}m`;
   }
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function formatJobRuntimeForJob(job: AgentJob): string {
+  return formatJobRuntime(job.startedAt, jobRuntimeEndAt(job));
 }
 
 function detectProcessArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {
