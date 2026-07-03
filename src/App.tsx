@@ -342,7 +342,7 @@ const copy = {
       timeline: "轨迹",
       compare: "对比",
       analysis: "分析过程",
-      monitor: "进程监控",
+      monitor: "任务控制室",
       experiments: "实验结果",
       rewrite: "优化 Skill",
       report: "报告"
@@ -512,7 +512,7 @@ const copy = {
       timeline: "Trace",
       compare: "Compare",
       analysis: "Analysis",
-      monitor: "Monitor",
+      monitor: "Job Control",
       experiments: "Experiments",
       rewrite: "Rewrite Skill",
       report: "Report"
@@ -1776,13 +1776,13 @@ function SessionHome({
         <button className="home-mode-card monitor" onClick={onOpenMonitor}>
           <span>
             <Activity size={19} />
-            {locale === "zh" ? "Agent 进程监控" : "Agent Process Monitor"}
+            {locale === "zh" ? "Agent 任务控制室" : "Agent Job Control Room"}
           </span>
-          <strong>{locale === "zh" ? "查看正在运行的 agent" : "Watch running agents"}</strong>
+          <strong>{locale === "zh" ? "查看和停止本机长任务" : "Watch and stop local long-running jobs"}</strong>
           <small>
             {locale === "zh"
-              ? "按 Codex / Claude 分组，监控它们启动的子进程、trace 和输出文件。"
-              : "Grouped by Codex / Claude, with child processes, traces, and output artifacts."}
+              ? "按任务聚合 Codex / Claude 启动的进程、输出产物、Docker 容器和安全停止结果。"
+              : "Grouped by job, with Codex / Claude processes, output artifacts, Docker containers, and safe-stop results."}
           </small>
         </button>
         <button className="home-mode-card experiments" onClick={onOpenExperiments}>
@@ -3554,12 +3554,12 @@ function MonitorPage({
           {t.app.back}
         </button>
         <div className="analysis-title-block">
-          <span>{locale === "zh" ? "Agent 进程可视化管理" : "Agent Process Monitor"}</span>
+          <span>{locale === "zh" ? "Agent 本机长任务管理" : "Agent Local Job Control"}</span>
           <h2>{t.views.monitor}</h2>
           <p>
             {locale === "zh"
-              ? "独立于 Skill 优化页面，用来查看 agent 启动的进程树、trace、日志产物，并支持停止单个进程或整组任务。"
-              : "Separate from the skill optimization page. Inspect agent process trees, traces, artifacts, and stop one process or a whole group."}
+              ? "独立于 Skill 优化页面，按任务查看本机 agent 的进度、输出产物、Docker 容器和安全停止结果。"
+              : "Separate from the skill optimization page. Review local agent jobs, progress, artifacts, Docker containers, and safe-stop results."}
           </p>
         </div>
       </div>
