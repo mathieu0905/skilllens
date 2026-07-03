@@ -65,6 +65,7 @@ const baseEvidenceFeatures = [
   "job-list-summary",
   "active-job-card",
   "primary-stop-action",
+  "job-source-context",
   "job-runtime-display",
   "artifact-copy-actions",
   "artifact-output-copy",
@@ -147,6 +148,11 @@ async function main() {
       `);
       assert(primaryStopVisible.result?.value === true, "primary safe stop action should be visible without scrolling the detail panel");
       await captureEvidence(browser, "02aa-primary-stop-action-visible.png", "primary-stop-action", "safe stop preview is available from the top next-action panel without scrolling");
+      await browser.waitForText("WORKING DIRECTORY", 15000);
+      await browser.waitForText("COMMAND", 15000);
+      await browser.waitForText("Copy cwd", 15000);
+      await browser.waitForText("Copy command", 15000);
+      await captureEvidence(browser, "02ab-job-source-context-visible.png", "job-source-context", "job detail shows the working directory and command before the technical process tree");
       await browser.waitForText("runtime", 15000);
       await captureEvidence(browser, "02a-runtime-display-visible.png", "job-runtime-display", "active and stale jobs show wall-clock runtime instead of last-update age");
       await verifySearchSortAndLiveControls(browser);

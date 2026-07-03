@@ -4106,6 +4106,8 @@ function JobDetail({
 }) {
   const progress = progressWithTail(job, artifactTails);
   const primaryArtifact = job.artifacts[0];
+  const sourceProcess = jobSourceProcess(job);
+  const sourceCommand = sourceProcess ? jobSourceCommand(sourceProcess) : "";
   const stopSummary = stopResult ? stopResultSummary(stopResult) : stopPlan ? stopPlanSummary(stopPlan) : job.canStop ? "Preview the safe stop plan before stopping anything." : "Root agent is protected; no stoppable child task is available.";
   const hasStopTargets = stopPlan ? stopPlanHasTargets(stopPlan) : false;
   const nextAction = jobNextAction(job, progress, stopPlan, stopResult);
@@ -4147,6 +4149,14 @@ function JobDetail({
       <div className="job-detail-summary">
         <span>{job.agentRoot?.label ?? "agent root unknown"} is protected</span>
         <span>Runtime {formatJobRuntimeForJob(job)} · Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
+        {sourceProcess ? (
+          <div className="job-source-summary">
+            <JobPathAction label="Working directory" value={sourceProcess.cwd} copied={copiedValue === sourceProcess.cwd} onCopy={() => void copyValue(sourceProcess.cwd)} copyLabel="Copy cwd" />
+            {sourceCommand ? (
+              <JobPathAction label="Command" value={sourceCommand} copied={copiedValue === sourceCommand} onCopy={() => void copyValue(sourceCommand)} copyLabel="Copy command" />
+            ) : null}
+          </div>
+        ) : null}
         {primaryArtifact ? (
           <JobPathAction label="Primary artifact" value={primaryArtifact.path} copied={copiedValue === primaryArtifact.path} onCopy={() => void copyValue(primaryArtifact.path)} />
         ) : null}
@@ -4258,13 +4268,15 @@ function JobPathAction({
   value,
   copied,
   onCopy,
-  compact
+  compact,
+  copyLabel = "Copy path"
 }: {
   label: string;
   value: string;
   copied: boolean;
   onCopy: () => void;
   compact?: boolean;
+  copyLabel?: string;
 }) {
   return (
     <div className={compact ? "job-path-action compact" : "job-path-action"}>
@@ -4274,7 +4286,7 @@ function JobPathAction({
       </div>
       <button className="secondary-button" onClick={onCopy}>
         <Copy size={14} />
-        {copied ? "Copied" : "Copy path"}
+        {copied ? "Copied" : copyLabel}
       </button>
     </div>
   );
@@ -5470,6 +5482,18 @@ function formatJobRuntimeForJob(job: AgentJob): string {
 function pathFileName(value: string): string {
   const normalized = value.replace(/\\/g, "/").replace(/\/+$/g, "");
   return normalized.split("/").pop() || value;
+}
+
+function jobSourceProcess(job: AgentJob): AgentProcessEvent | undefined {
+  return job.processes.find((processEvent) => processEvent.canStop) ?? job.processes[0];
+}
+
+function jobSourceCommand(processEvent: AgentProcessEvent): string {
+  const args = processEvent.args.join(" ").trim();
+  if (!args) {
+    return processEvent.command;
+  }
+  return args.toLowerCase().startsWith(processEvent.command.toLowerCase()) ? args : `${processEvent.command} ${args}`;
 }
 
 function detectProcessArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {

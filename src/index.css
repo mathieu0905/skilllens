@@ -2773,6 +2773,11 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.job-source-summary {
+  display: grid;
+  gap: 8px;
+}
+
 .job-path-action {
   min-width: 0;
   border: 1px solid #e3e8ef;

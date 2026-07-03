@@ -26,6 +26,7 @@ const baseEvidenceFeatures = [
   "job-list-summary",
   "active-job-card",
   "primary-stop-action",
+  "job-source-context",
   "job-runtime-display",
   "artifact-copy-actions",
   "artifact-output-copy",
