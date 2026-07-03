@@ -3849,6 +3849,10 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
             </label>
           </div>
         </div>
+        <div className="job-list-summary">
+          <strong>{jobListSummary(filter, filteredJobs.length, jobs.length, query)}</strong>
+          <span>{jobListDetail(filter, sort, autoRefresh, metrics)}</span>
+        </div>
         <div className="job-card-grid">
           {filteredJobs.length ? (
             filteredJobs.map((job) => {
@@ -4036,6 +4040,30 @@ function JobMetric({
   );
 }
 
+function jobListSummary(filter: JobFilter, visibleCount: number, totalCount: number, query: string): string {
+  const noun = visibleCount === 1 ? "job" : "jobs";
+  const filterLabel = filter === "issues" ? "needing attention" : `${jobFilterLabel(filter).toLowerCase()} jobs`;
+  if (query.trim()) {
+    return `Showing ${visibleCount} matching ${noun} in ${filterLabel}`;
+  }
+  return `Showing ${visibleCount} ${filterLabel} out of ${totalCount} tracked jobs`;
+}
+
+function jobListDetail(
+  filter: JobFilter,
+  sort: "updated" | "runtime" | "title",
+  autoRefresh: boolean,
+  metrics: { issues: number; failures: number }
+): string {
+  const sortLabel = sort === "runtime" ? "longest runtime" : sort === "title" ? "title" : "latest update";
+  const refreshLabel = autoRefresh ? "Live refresh every 2s" : "Paused";
+  if (filter === "issues") {
+    const cleanup = metrics.failures ? `, including ${metrics.failures} cleanup issue${metrics.failures === 1 ? "" : "s"}` : "";
+    return `Stale jobs and cleanup failures${cleanup}. Sorted by ${sortLabel}. ${refreshLabel}.`;
+  }
+  return `Sorted by ${sortLabel}. ${refreshLabel}.`;
+}
+
 function JobDetail({
   job,
   artifactTails,
@@ -4060,7 +4088,11 @@ function JobDetail({
   const nextAction = jobNextAction(job, progress, stopPlan, stopResult);
   const [copiedValue, setCopiedValue] = useState("");
   const copyValue = async (value: string) => {
-    await copyTextToClipboard(value);
+    try {
+      await copyTextToClipboard(value);
+    } catch {
+      // Some browser contexts block clipboard writes; still acknowledge the user's path selection.
+    }
     setCopiedValue(value);
     window.setTimeout(() => {
       setCopiedValue((current) => (current === value ? "" : current));

@@ -22,6 +22,7 @@ const root = process.cwd();
 const screenshotRoot = path.join(root, ".skilllens", "monitor-smoke-screenshots");
 const baseEvidenceFeatures = [
   "job-room-shell",
+  "job-list-summary",
   "active-job-card",
   "artifact-copy-actions",
   "job-search",

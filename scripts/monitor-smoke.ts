@@ -61,6 +61,7 @@ const screenshotEvidence: ScreenshotEvidence[] = [];
 const includeDockerEvidence = process.argv.includes("--docker");
 const baseEvidenceFeatures = [
   "job-room-shell",
+  "job-list-summary",
   "active-job-card",
   "artifact-copy-actions",
   "job-search",
@@ -100,7 +101,7 @@ async function main() {
   try {
     const processEvent = await waitForProcess((item) => hasArtifact(item, artifactPath), 25000);
     assert(processEvent.agentRootPid, "process should be linked to a Codex agent root");
-    assert(processEvent.artifactPaths?.some((item) => item.path === artifactPath), "artifact path should be detected");
+      assert(processEvent.artifactPaths?.some((item) => item.path === artifactPath), "artifact path should be detected");
 
     await waitForArtifactText("fake-codex-smoke-step-2", 25000);
     await waitForJob((item) => hasArtifact(item, artifactPath) && item.status === "active", 25000);
@@ -109,6 +110,8 @@ async function main() {
     try {
       await captureEvidence(browser, "01-monitor-page-loaded.png", "job-room-shell", "metrics, filters, search, sort, refresh, and live toggle are visible");
       await browser.waitForText("fake-codex-output.log", 30000);
+      await browser.waitForText("Showing", 15000);
+      await captureEvidence(browser, "01a-job-list-summary-visible.png", "job-list-summary", "job list summary explains the current filter, result count, sort order, and refresh state");
       await browser.evaluate(`
         (() => {
           const group = [...document.querySelectorAll('.agent-process-group')]

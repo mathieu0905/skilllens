@@ -2507,6 +2507,35 @@ textarea {
   width: auto;
 }
 
+.job-list-summary {
+  margin-top: 10px;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.job-list-summary strong,
+.job-list-summary span {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.job-list-summary strong {
+  color: #243246;
+}
+
+.job-list-summary span {
+  color: #66778a;
+  text-align: right;
+}
+
 .segmented.active {
   border-color: #1967d2;
   color: #12468f;
@@ -3897,6 +3926,15 @@ textarea {
   .job-live-controls {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .job-list-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .job-list-summary span {
+    text-align: left;
   }
 
   .job-path-action {
