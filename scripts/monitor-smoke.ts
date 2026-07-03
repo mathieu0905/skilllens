@@ -361,6 +361,7 @@ async function runStaleJobCase() {
         })()
       `);
       assert(issuesClicked.result?.value === true, "Issues filter should be visible");
+      await setMonitorSearch(browser, path.basename(staleArtifact));
       await browser.waitForText("stale-codex-output.log", 15000);
       await captureEvidence(browser, "06-issues-filter-visible.png", "issues-filter", "issues filter groups stale jobs and cleanup failures that need attention");
       const attentionSorted = await browser.evaluate(`
@@ -384,6 +385,7 @@ async function runStaleJobCase() {
         })()
       `);
       assert(staleClicked.result?.value === true, "Stale filter should be visible");
+      await waitForSearchValue(browser, path.basename(staleArtifact), 5000);
       await browser.waitForText("stale-codex-output.log", 15000);
       await captureEvidence(browser, "06b-stale-job-visible.png", "stale-job-filter", "stale filter exposes jobs with no artifact/log updates for more than 30 seconds");
     } finally {
@@ -477,6 +479,20 @@ async function waitForSearchValue(browser: BrowserSession, value: string, timeou
     await sleep(250);
   }
   throw new Error(`timed out waiting for search value: ${value}`);
+}
+
+async function setMonitorSearch(browser: BrowserSession, value: string) {
+  const result = await browser.evaluate(`
+    (() => {
+      const input = document.querySelector('input[aria-label="Search jobs"]');
+      if (!(input instanceof HTMLInputElement)) return 'missing-search';
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return input.value;
+    })()
+  `);
+  assert(result.result?.value === value, `search value should be set to ${value}, got ${result.result?.value}`);
 }
 
 async function captureRecentHistoryEvidence(filePath: string, screenshotName: string) {
