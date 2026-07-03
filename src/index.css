@@ -2482,6 +2482,19 @@ textarea {
   box-shadow: none;
 }
 
+.job-search .icon-button {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  color: #66778a;
+  background: #f6f8fb;
+}
+
+.job-search .icon-button:hover {
+  color: #12468f;
+  background: #eef4ff;
+}
+
 .job-live-controls {
   display: flex;
   align-items: center;

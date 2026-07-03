@@ -3825,7 +3825,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
           ))}
         </div>
         <div className="job-toolbar">
-          <label className="job-search">
+          <div className="job-search">
             <Search size={15} />
             <input
               value={query}
@@ -3833,7 +3833,12 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
               placeholder="Search job, artifact, container, command"
               aria-label="Search jobs"
             />
-          </label>
+            {query.trim() ? (
+              <button className="icon-button" onClick={() => setQuery("")} aria-label="Clear search">
+                <XCircle size={14} />
+              </button>
+            ) : null}
+          </div>
           <select value={sort} onChange={(event) => setSort(event.target.value as JobSort)} aria-label="Sort jobs">
             <option value="attention">Needs attention</option>
             <option value="updated">Latest update</option>

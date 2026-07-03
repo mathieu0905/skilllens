@@ -65,6 +65,7 @@ const baseEvidenceFeatures = [
   "active-job-card",
   "artifact-copy-actions",
   "job-search",
+  "job-search-clear",
   "job-sort",
   "live-refresh-toggle",
   "job-progress-and-artifact-tail",
@@ -248,13 +249,26 @@ async function verifySearchSortAndLiveControls(browser: BrowserSession) {
       const input = document.querySelector('input[aria-label="Search jobs"]');
       if (!(input instanceof HTMLInputElement)) return 'missing-search';
       input.focus();
-      input.value = 'fake-codex-output.log';
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(input, 'fake-codex-output.log');
       input.dispatchEvent(new Event('input', { bubbles: true }));
       return document.body.innerText.includes('fake-codex-output.log') ? 'ok' : 'search-no-match';
     })()
   `);
   assert(searched.result?.value === "ok", `search control should filter to the active job, got ${searched.result?.value}`);
   await captureEvidence(browser, "02b-search-filter-visible.png", "job-search", "search filters jobs by title, artifact path, container, command, or cwd");
+  const cleared = await browser.evaluate(`
+    (() => {
+      const button = document.querySelector('button[aria-label="Clear search"]');
+      if (!(button instanceof HTMLButtonElement)) return 'missing-clear';
+      button.click();
+      return 'clicked';
+    })()
+  `);
+  assert(cleared.result?.value === "clicked", `clear search should be clickable, got ${cleared.result?.value}`);
+  await waitForSearchValue(browser, "", 5000);
+  await browser.waitForText("Showing", 15000);
+  await captureEvidence(browser, "02ba-search-clear-visible.png", "job-search-clear", "clear search resets the query without manual text deletion");
 
   const sorted = await browser.evaluate(`
     (() => {
@@ -285,13 +299,31 @@ async function verifySearchSortAndLiveControls(browser: BrowserSession) {
       const input = document.querySelector('input[aria-label="Search jobs"]');
       if (checkbox instanceof HTMLInputElement && !checkbox.checked) checkbox.click();
       if (input instanceof HTMLInputElement) {
-        input.value = '';
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(input, '');
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
       return document.body.innerText.includes('Live') ? 'ok' : 'live-label-missing';
     })()
   `);
   assert(restored.result?.value === "ok", `live toggle should switch back to Live, got ${restored.result?.value}`);
+}
+
+async function waitForSearchValue(browser: BrowserSession, value: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await browser.evaluate(`
+      (() => {
+        const input = document.querySelector('input[aria-label="Search jobs"]');
+        return input instanceof HTMLInputElement ? input.value : 'missing-search';
+      })()
+    `);
+    if (result.result?.value === value) {
+      return;
+    }
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for search value: ${value}`);
 }
 
 async function captureRecentHistoryEvidence(filePath: string, screenshotName: string) {
