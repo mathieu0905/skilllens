@@ -17,7 +17,16 @@ import { buildSkillOptimizerPrompt } from "../src/lib/skillOptimizerPrompt";
 import { summarizeCoverage } from "../src/lib/coverage";
 import type { CoverageFinding, CoverageStatus, CoverageTarget, ProjectResult, SkillGraphArtifact, SkillLensProject } from "../src/lib/types";
 
-type Command = "plan" | "collect" | "analyze" | "judge" | "propose" | "rerun-plan" | "remote-script" | "help";
+type Command =
+  | "plan"
+  | "collect"
+  | "analyze"
+  | "judge"
+  | "propose"
+  | "rerun-plan"
+  | "analysis-plan"
+  | "remote-script"
+  | "help";
 type TrialMode = "with" | "without" | "unknown";
 
 interface CliOptions {
@@ -202,6 +211,9 @@ async function main() {
       return;
     case "rerun-plan":
       await createOptimizedRerunPlan(options);
+      return;
+    case "analysis-plan":
+      await createOptimizedAnalysisPlan(options);
       return;
     case "remote-script":
       await createRemoteRunScript(options);
@@ -989,6 +1001,34 @@ async function createOptimizedRerunPlan(options: CliOptions) {
   console.log(`Wrote ${path.join(outDir, "run-optimized.sh")}`);
 }
 
+async function createOptimizedAnalysisPlan(options: CliOptions) {
+  const planPath = requirePath(options.plan, "--plan");
+  const plan = JSON.parse(await readFile(path.resolve(planPath), "utf8")) as SkillsBenchRunPlan;
+  const optimizedRoot = path.resolve(requirePath(options.optimizedSkillsRoot, "--optimized-skills-root"));
+  const outDir = path.resolve(options.out ?? path.join(path.dirname(path.resolve(planPath)), "optimized-analysis"));
+  const tasks = plan.tasks.map((task) => {
+    const optimizedSkillsDir = path.join(optimizedRoot, task.id, "environment", "skills");
+    const skillPaths = task.skillPaths
+      .map((skillPath) => relativeSkillPathWithinSkillsDir(task, skillPath))
+      .filter((relativePath): relativePath is string => Boolean(relativePath))
+      .map((relativePath) => path.join(optimizedSkillsDir, relativePath));
+    return {
+      ...task,
+      skillsDir: optimizedSkillsDir,
+      skillPaths
+    };
+  });
+  const analysisPlan: SkillsBenchRunPlan = {
+    ...plan,
+    createdAt: new Date().toISOString(),
+    tasks
+  };
+
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, "run-plan.json"), `${JSON.stringify(analysisPlan, null, 2)}\n`);
+  console.log(`Wrote optimized analysis plan to ${path.join(outDir, "run-plan.json")}`);
+}
+
 async function createRemoteRunScript(options: CliOptions) {
   const planPath = requirePath(options.plan, "--plan");
   const plan = JSON.parse(await readFile(path.resolve(planPath), "utf8")) as SkillsBenchRunPlan;
@@ -1277,20 +1317,30 @@ function resolveOptimizationSkillPaths(
 
   const skillsDir = path.resolve(task.skillsDir);
   const originalResolved = path.resolve(originalSkillPath);
-  let relativeToSkillsDir = path.relative(skillsDir, originalResolved);
-  if (relativeToSkillsDir.startsWith("..") || path.isAbsolute(relativeToSkillsDir)) {
-    const marker = `${path.sep}environment${path.sep}skills${path.sep}`;
-    const markerIndex = originalResolved.lastIndexOf(marker);
-    if (markerIndex < 0) {
-      return null;
-    }
-    relativeToSkillsDir = originalResolved.slice(markerIndex + marker.length);
+  const relativeToSkillsDir = relativeSkillPathWithinSkillsDir(task, originalResolved);
+  if (!relativeToSkillsDir) {
+    return null;
   }
 
   return {
     originalSkillPath,
     targetSkillPath: path.join(outRoot, task.id, "environment", "skills", relativeToSkillsDir)
   };
+}
+
+function relativeSkillPathWithinSkillsDir(task: TaskPlan, skillPath: string): string | null {
+  const skillsDir = path.resolve(task.skillsDir);
+  const resolved = path.resolve(skillPath);
+  let relativeToSkillsDir = path.relative(skillsDir, resolved);
+  if (relativeToSkillsDir.startsWith("..") || path.isAbsolute(relativeToSkillsDir)) {
+    const marker = `${path.sep}environment${path.sep}skills${path.sep}`;
+    const markerIndex = resolved.lastIndexOf(marker);
+    if (markerIndex < 0) {
+      return null;
+    }
+    relativeToSkillsDir = resolved.slice(markerIndex + marker.length);
+  }
+  return relativeToSkillsDir;
 }
 
 function runTrialCommand(condition: string, taskId: string, trial: number, command: string): string {
@@ -2502,6 +2552,7 @@ function isCommand(value: string | undefined): value is Command {
     value === "judge" ||
     value === "propose" ||
     value === "rerun-plan" ||
+    value === "analysis-plan" ||
     value === "remote-script" ||
     value === "help"
   );
@@ -2733,6 +2784,7 @@ function printUsage() {
   npm run skillsbench -- judge --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --trials-file .skilllens/experiments/sb-codex-gpt55/collected/trials.json --out .skilllens/experiments/sb-codex-gpt55/agent-analysis
   npm run skillsbench -- propose --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --analysis .skilllens/experiments/sb-codex-gpt55/analysis/violation-rates.json --out .skilllens/experiments/sb-codex-gpt55/optimized-skills
   npm run skillsbench -- rerun-plan --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --optimized-skills-root .skilllens/experiments/sb-codex-gpt55/optimized-skills --out .skilllens/experiments/sb-codex-gpt55
+  npm run skillsbench -- analysis-plan --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --optimized-skills-root .skilllens/experiments/sb-codex-gpt55/optimized-skills --out .skilllens/experiments/sb-codex-gpt55/optimized-analysis
   npm run skillsbench -- remote-script --plan .skilllens/experiments/sb-codex-gpt55/run-plan.json --out .skilllens/experiments/sb-codex-gpt55
 
 Options:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SkillScope E2E"
+  short_description: "Run SkillsBench optimization loops end to end"
+  default_prompt: "Run a SkillScope end-to-end optimization experiment over selected SkillsBench tasks."
