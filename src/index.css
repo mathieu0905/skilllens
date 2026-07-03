@@ -2722,13 +2722,59 @@ textarea {
 .job-detail-summary {
   padding: 10px 12px 0;
   display: grid;
-  gap: 4px;
+  gap: 8px;
 }
 
 .job-detail-summary span {
   color: #66778a;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.job-path-action {
+  min-width: 0;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.job-path-action.compact {
+  margin: 8px 0;
+  background: #ffffff;
+}
+
+.job-path-action div {
+  min-width: 0;
+}
+
+.job-path-action span,
+.job-path-action code {
+  display: block;
+}
+
+.job-path-action span {
+  color: #66778a;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.job-path-action code {
+  margin-top: 3px;
+  color: #243246;
+  font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.job-path-action .secondary-button {
+  min-width: 102px;
+  justify-content: center;
 }
 
 .job-next-action {
@@ -3851,6 +3897,14 @@ textarea {
   .job-live-controls {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .job-path-action {
+    grid-template-columns: 1fr;
+  }
+
+  .job-path-action .secondary-button {
+    width: 100%;
   }
 
   .stop-preview-grid,

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock3,
   Code2,
+  Copy,
   Download,
   FileJson,
   FileText,
@@ -4057,6 +4058,14 @@ function JobDetail({
   const stopSummary = stopResult ? stopResultSummary(stopResult) : stopPlan ? stopPlanSummary(stopPlan) : job.canStop ? "Preview the safe stop plan before stopping anything." : "Root agent is protected; no stoppable child task is available.";
   const hasStopTargets = stopPlan ? stopPlanHasTargets(stopPlan) : false;
   const nextAction = jobNextAction(job, progress, stopPlan, stopResult);
+  const [copiedValue, setCopiedValue] = useState("");
+  const copyValue = async (value: string) => {
+    await copyTextToClipboard(value);
+    setCopiedValue(value);
+    window.setTimeout(() => {
+      setCopiedValue((current) => (current === value ? "" : current));
+    }, 1800);
+  };
   return (
     <div className="monitor-panel job-detail">
       <div className="stream-head">
@@ -4083,8 +4092,10 @@ function JobDetail({
       <div className="job-detail-summary">
         <span>{job.agentRoot?.label ?? "agent root unknown"} is protected</span>
         <span>Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
-        {primaryArtifact ? <span>Primary artifact: {primaryArtifact.path}</span> : null}
-        {job.historyPath ? <code>{job.historyPath}</code> : null}
+        {primaryArtifact ? (
+          <JobPathAction label="Primary artifact" value={primaryArtifact.path} copied={copiedValue === primaryArtifact.path} onCopy={() => void copyValue(primaryArtifact.path)} />
+        ) : null}
+        {job.historyPath ? <JobPathAction label="History JSON" value={job.historyPath} copied={copiedValue === job.historyPath} onCopy={() => void copyValue(job.historyPath!)} /> : null}
       </div>
       <div className={`job-next-action ${nextAction.tone}`}>
         <span>Next action</span>
@@ -4101,6 +4112,7 @@ function JobDetail({
               return (
                 <details key={artifact.path} open={job.artifacts.length === 1}>
                   <summary>{artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {artifact.path}</summary>
+                  <JobPathAction label="Artifact path" value={artifact.path} copied={copiedValue === artifact.path} onCopy={() => void copyValue(artifact.path)} compact />
                   <pre>{tail?.content ? truncate(tail.content, 9000) : tail?.error ?? "Waiting for content..."}</pre>
                 </details>
               );
@@ -4161,6 +4173,33 @@ function JobDetail({
           <p className="job-technical-note">Stops only target child process groups and containers listed in the preview. Codex/Claude root agent groups stay protected.</p>
         </section>
       </details>
+    </div>
+  );
+}
+
+function JobPathAction({
+  label,
+  value,
+  copied,
+  onCopy,
+  compact
+}: {
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <div className={compact ? "job-path-action compact" : "job-path-action"}>
+      <div>
+        <span>{label}</span>
+        <code>{value}</code>
+      </div>
+      <button className="secondary-button" onClick={onCopy}>
+        <Copy size={14} />
+        {copied ? "Copied" : "Copy path"}
+      </button>
     </div>
   );
 }
@@ -5080,6 +5119,31 @@ function writeMonitorPreference(key: string, value: string) {
     return;
   }
   window.localStorage.setItem(key, value);
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall back to the selection-based copy path below.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    // The UI still exposes the selected path, even if the host browser blocks clipboard writes.
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function jobFilterLabel(filter: JobFilter): string {

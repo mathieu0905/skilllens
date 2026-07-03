@@ -23,6 +23,7 @@ const screenshotRoot = path.join(root, ".skilllens", "monitor-smoke-screenshots"
 const baseEvidenceFeatures = [
   "job-room-shell",
   "active-job-card",
+  "artifact-copy-actions",
   "job-search",
   "job-sort",
   "live-refresh-toggle",

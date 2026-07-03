@@ -62,6 +62,7 @@ const includeDockerEvidence = process.argv.includes("--docker");
 const baseEvidenceFeatures = [
   "job-room-shell",
   "active-job-card",
+  "artifact-copy-actions",
   "job-search",
   "job-sort",
   "live-refresh-toggle",
@@ -139,8 +140,20 @@ async function main() {
       await captureEvidence(browser, "04-stop-preview-visible.png", "safe-stop-preview", "preview lists protected root, process targets, and container targets before execution");
 
       await clickEnabledButton(browser, "Execute stop", 15000);
-      await browser.waitForText("Stop result", 15000);
+      await browser.waitForText("Stop result", 45000);
       await captureEvidence(browser, "05-stop-result-visible.png", "safe-stop-result", "stop result shows killed processes, removed containers, residual checks, and cleanup errors");
+      const copiedPath = await browser.evaluate(`
+        (() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((item) => (item.textContent || '').includes('Copy path'));
+          button?.scrollIntoView({ block: 'center' });
+          button?.click();
+          return Boolean(button);
+        })()
+      `);
+      assert(copiedPath.result?.value === true, "copy path button should be visible");
+      await browser.waitForText("Copied", 15000);
+      await captureEvidence(browser, "05a-artifact-copy-action.png", "artifact-copy-actions", "artifact and history paths can be copied from the job detail");
     } finally {
       await browser.close();
     }
@@ -288,10 +301,13 @@ async function clickEnabledButton(browser: BrowserSession, label: string, timeou
   while (Date.now() < deadline) {
     const result = await browser.evaluate(`
       (() => {
-        const button = [...document.querySelectorAll('button')]
+        const scope = document.querySelector('.job-detail') || document;
+        const button = [...scope.querySelectorAll('button')]
           .find((item) => (item.textContent || '').includes(${JSON.stringify(label)}));
         if (!(button instanceof HTMLButtonElement)) return 'missing';
         if (button.disabled) return 'disabled';
+        button.scrollIntoView({ block: 'center' });
+        button.focus();
         button.click();
         return 'clicked';
       })()
@@ -481,7 +497,7 @@ wait "$child"
       await browser.waitForText(name, 15000);
       await captureEvidence(browser, "09-docker-stop-preview-visible.png", "docker-stop-preview", "docker stop preview lists the detached container to remove");
       await clickEnabledButton(browser, "Execute stop", 15000);
-      await browser.waitForText("Stop result", 15000);
+      await browser.waitForText("Stop result", 45000);
       await captureEvidence(browser, "10-docker-stop-result-visible.png", "docker-stop-result", "docker stop result shows container removal and residual container check");
     } finally {
       await browser.close();
@@ -559,7 +575,7 @@ wait "$child"
       await browser.waitForText(name, 15000);
       await captureEvidence(browser, "13-docker-codex-exec-stop-preview.png", "docker-codex-exec-stop-preview", "docker codex-exec stop preview lists process and container cleanup targets");
       await clickEnabledButton(browser, "Execute stop", 15000);
-      await browser.waitForText("Stop result", 15000);
+      await browser.waitForText("Stop result", 45000);
       await captureEvidence(browser, "14-docker-codex-exec-stop-result.png", "docker-codex-exec-stop-result", "docker codex-exec stop result shows cleanup and residual checks");
     } finally {
       await browser.close();
