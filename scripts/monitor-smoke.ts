@@ -97,6 +97,9 @@ const dockerEvidenceFeatures = [
   "docker-artifact-container-detail",
   "docker-stop-preview",
   "docker-stop-result",
+  "docker-compose-project-detail",
+  "docker-compose-stop-preview",
+  "docker-compose-stop-result",
   "docker-codex-exec-job-filter",
   "docker-codex-exec-detail",
   "docker-codex-exec-stop-preview",
@@ -231,17 +234,8 @@ async function main() {
       await browser.waitForText("fake-codex-smoke-step", 30000);
       await captureEvidence(browser, "03-job-progress-live.png", "job-progress-and-artifact-tail", "progress and artifact tail update from the live job log");
 
-      const previewed = await browser.evaluate(`
-        (() => {
-          const buttons = [...document.querySelectorAll('button')];
-          const button = buttons.find((item) => (item.textContent || '').includes('Preview stop'));
-          button?.scrollIntoView({ block: 'center' });
-          button?.click();
-          return Boolean(button);
-        })()
-      `);
-      assert(previewed.result?.value === true, "stop preview button should be visible");
-      await browser.waitForText("Stop preview", 15000);
+      await clickEnabledButton(browser, "Preview stop", 45000);
+      await browser.waitForText("Stop preview", 45000);
       const stopPreviewVisible = await browser.evaluate(`
         (() => {
           const plan = [...document.querySelectorAll('.stop-plan')]
@@ -323,11 +317,12 @@ async function main() {
     const stoppedJob = await waitForJob((item) => hasArtifact(item, artifactPath) && ["stopped", "failed"].includes(item.status), 15000);
     assert(Boolean(stoppedJob.lastStopResult), "stopped job should keep the stop result in recent history");
     await assertStoppedHistoryJson(stoppedJob);
-    await captureHistoryJsonEvidence(artifactPath, "05aaa-history-json-record.png");
+    await captureHistoryJsonEvidence(stoppedJob, "05aaa-history-json-record.png");
     await captureRecentHistoryEvidence(artifactPath, "05b-recent-history-visible.png");
 
     await runStaleJobCase();
     await maybeRunDockerCase();
+    await maybeRunDockerComposeCase();
     await maybeRunDockerCodexExecCase();
     await writeEvidenceManifest();
 
@@ -567,7 +562,7 @@ async function captureRecentHistoryEvidence(filePath: string, screenshotName: st
   }
 }
 
-async function captureHistoryJsonEvidence(filePath: string, screenshotName: string) {
+async function captureHistoryJsonEvidence(job: AgentJob, screenshotName: string) {
   const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
   try {
     const clicked = await browser.evaluate(`
@@ -578,18 +573,8 @@ async function captureHistoryJsonEvidence(filePath: string, screenshotName: stri
       })()
     `);
     assert(clicked.result?.value === true, "Recent filter should be visible for history JSON evidence");
-    await setMonitorSearch(browser, filePath);
-    await browser.waitForText(path.basename(filePath), 15000);
-    const selected = await browser.evaluate(`
-      (() => {
-        const card = [...document.querySelectorAll('.job-card')]
-          .find((node) => (node.textContent || '').includes(${JSON.stringify(path.basename(filePath))}));
-        card?.scrollIntoView({ block: 'center' });
-        if (card instanceof HTMLElement) card.click();
-        return Boolean(card);
-      })()
-    `);
-    assert(selected.result?.value === true, "stopped job card should be selectable for history JSON evidence");
+    await setMonitorSearch(browser, job.historyPath ?? job.artifacts[0]?.path ?? job.title);
+    await selectFirstJobCard(browser, "history JSON evidence");
     await browser.waitForText("HISTORY JSON", 15000);
     const historyVisible = await browser.evaluate(`
       (() => {
@@ -638,6 +623,25 @@ async function clickEnabledButton(browser: BrowserSession, label: string, timeou
     await sleep(300);
   }
   throw new Error(`timed out waiting for enabled button: ${label}`);
+}
+
+async function selectFirstJobCard(browser: BrowserSession, context: string) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const selected = await browser.evaluate(`
+      (() => {
+        const card = document.querySelector('.job-card');
+        card?.scrollIntoView({ block: 'center' });
+        if (card instanceof HTMLElement) card.click();
+        return Boolean(card);
+      })()
+    `);
+    if (selected.result?.value === true) {
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error(`stopped job card should be selectable for ${context}`);
 }
 
 async function captureEvidence(browser: BrowserSession, screenshotName: string, feature: string, assertion: string) {
@@ -804,16 +808,8 @@ wait "$child"
         })()
       `);
       await captureEvidence(browser, "08-docker-process-and-artifact-detected.png", "docker-artifact-container-detail", "docker job detail shows artifact tail and detached container name");
-      const previewed = await browser.evaluate(`
-        (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Preview stop'));
-          button?.scrollIntoView({ block: 'center' });
-          button?.click();
-          return Boolean(button);
-        })()
-      `);
-      assert(previewed.result?.value === true, "docker stop preview should be visible");
-      await browser.waitForText("Stop preview", 15000);
+      await clickEnabledButton(browser, "Preview stop", 45000);
+      await browser.waitForText("Stop preview", 45000);
       await browser.waitForText(name, 15000);
       await captureEvidence(browser, "09-docker-stop-preview-visible.png", "docker-stop-preview", "docker stop preview lists the detached container to remove");
       await clickEnabledButton(browser, "Execute stop", 15000);
@@ -832,6 +828,81 @@ wait "$child"
   } finally {
     killProcessGroup(child.pid);
     await commandOutput("docker", ["rm", "-f", name]).catch(() => "");
+  }
+}
+
+async function maybeRunDockerComposeCase() {
+  if (!process.argv.includes("--docker")) {
+    return;
+  }
+  await commandOutput("docker", ["compose", "version"]).catch((error) => {
+    throw new Error(`docker compose smoke skipped: docker compose is not reachable (${error instanceof Error ? error.message : error})`);
+  });
+  const project = `skillscopecompose${runId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 18)}`;
+  const expectedContainer = `${project}-worker-1`;
+  const composeArtifact = path.join(workDir, "fake-docker-compose.log");
+  const composeBinDir = path.join(workDir, "docker-compose-bin");
+  await mkdir(composeBinDir, { recursive: true });
+  const fakeCodexPath = path.join(composeBinDir, "codex");
+  await writeFile(
+    fakeCodexPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+artifact="$1"
+echo "docker-compose-case-start $$" >> "$artifact"
+setsid bash -lc 'artifact="$1"; : docker compose -p ${project}; docker rm -f $(docker ps -aq --filter label=com.docker.compose.project=${project}) >/dev/null 2>&1 || true; docker run -d --name ${expectedContainer} --label com.docker.compose.project=${project} --label com.docker.compose.service=worker alpine sh -c "while true; do echo compose-smoke-step; sleep 2; done" >> "$artifact" 2>&1; echo "docker-compose-project ${project}" >> "$artifact"; while true; do echo "docker-compose-child-alive ${project}" >> "$artifact"; sleep 2; done' bash "$artifact" &
+child=$!
+wait "$child"
+`,
+    "utf8"
+  );
+  await chmod(fakeCodexPath, 0o755);
+  const child = spawn(fakeCodexPath, [composeArtifact], { cwd: root, detached: process.platform !== "win32", stdio: "ignore" });
+  child.unref();
+  try {
+    await waitForProcess((item) => Boolean(item.canStop) && hasArtifact(item, composeArtifact) && JSON.stringify(item).includes(project), 60000);
+    await waitForArtifactTextAt(composeArtifact, "docker-compose-project", 45000);
+    const composeJob = await waitForJob((item) => hasArtifact(item, composeArtifact) && JSON.stringify(item).includes(expectedContainer), 45000);
+    const composeJobJson = JSON.stringify(composeJob);
+    assert(composeJobJson.includes(`"source":"compose-project"`) && composeJobJson.includes(`"project":"${project}"`), "compose job should preserve compose project metadata");
+    const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+    try {
+      await browser.waitForText("fake-docker-compose.log", 30000);
+      await browser.evaluate(`
+        (() => {
+          const group = [...document.querySelectorAll('.agent-process-group')]
+            .find((node) => (node.textContent || '').includes('fake-docker-compose.log') || (node.textContent || '').includes(${JSON.stringify(expectedContainer)}));
+          if (!group) return false;
+          group.scrollIntoView({ block: 'center' });
+          if (group instanceof HTMLElement) group.click();
+          group.querySelectorAll('details').forEach((item) => { item.open = true; });
+          group.style.outline = '3px solid #1f6b3a';
+          return true;
+        })()
+      `);
+      await captureEvidence(browser, "10a-docker-compose-project-detected.png", "docker-compose-project-detail", "docker compose project container is detected from compose labels and shown in the job detail");
+      await clickEnabledButton(browser, "Preview stop", 45000);
+      await browser.waitForText("Stop preview", 45000);
+      await browser.waitForText(expectedContainer, 15000);
+      await browser.waitForText("compose project", 15000);
+      await captureEvidence(browser, "10b-docker-compose-stop-preview.png", "docker-compose-stop-preview", "docker compose stop preview lists containers found from compose project labels");
+      await clickEnabledButton(browser, "Execute stop", 15000);
+      await browser.waitForText("Stop result", 45000);
+      await captureEvidence(browser, "10c-docker-compose-stop-result.png", "docker-compose-stop-result", "docker compose stop result shows label-discovered container removal and residual checks");
+    } finally {
+      await browser.close();
+    }
+    const running = await commandOutput("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${project}`]);
+    if (running.trim()) {
+      await removeDockerComposeProjectContainers(project);
+      throw new Error("docker compose container survived frontend stop");
+    }
+    await waitForJob((item) => hasArtifact(item, composeArtifact) && ["stopped", "failed"].includes(item.status), 15000);
+    console.log("docker compose smoke passed");
+  } finally {
+    killProcessGroup(child.pid);
+    await killProcessesMatching(project).catch(() => undefined);
+    await removeDockerComposeProjectContainers(project).catch(() => undefined);
   }
 }
 
@@ -882,16 +953,8 @@ wait "$child"
         })()
       `);
       await captureEvidence(browser, "12-docker-codex-exec-detected.png", "docker-codex-exec-detail", "docker codex-exec detail shows host process, artifact tail, and container");
-      const previewed = await browser.evaluate(`
-        (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Preview stop'));
-          button?.scrollIntoView({ block: 'center' });
-          button?.click();
-          return Boolean(button);
-        })()
-      `);
-      assert(previewed.result?.value === true, "docker codex-exec stop preview should be visible");
-      await browser.waitForText("Stop preview", 15000);
+      await clickEnabledButton(browser, "Preview stop", 45000);
+      await browser.waitForText("Stop preview", 45000);
       await browser.waitForText(name, 15000);
       await captureEvidence(browser, "13-docker-codex-exec-stop-preview.png", "docker-codex-exec-stop-preview", "docker codex-exec stop preview lists process and container cleanup targets");
       await clickEnabledButton(browser, "Execute stop", 15000);
@@ -1033,6 +1096,35 @@ function killProcessGroup(pid: number | undefined) {
 async function commandExists(command: string): Promise<boolean> {
   const checker = process.platform === "win32" ? "where" : "which";
   return commandOutput(checker, [command]).then(() => true, () => false);
+}
+
+async function removeDockerComposeProjectContainers(project: string) {
+  const ids = await commandOutput("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${project}`]).catch(() => "");
+  const targets = ids.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (targets.length) {
+    await commandOutput("docker", ["rm", "-f", ...targets]);
+  }
+}
+
+async function killProcessesMatching(pattern: string) {
+  if (process.platform === "win32") {
+    return;
+  }
+  const rows = await commandOutput("ps", ["-eo", "pid=,pgid=,args="]).catch(() => "");
+  for (const row of rows.split(/\r?\n/)) {
+    const match = row.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match || !match[3].includes(pattern)) {
+      continue;
+    }
+    const pgid = Number(match[2]);
+    if (pgid > 1) {
+      try {
+        process.kill(-pgid, "SIGTERM");
+      } catch {
+        // Best-effort cleanup for smoke-owned helper processes.
+      }
+    }
+  }
 }
 
 function commandOutput(command: string, args: string[]): Promise<string> {

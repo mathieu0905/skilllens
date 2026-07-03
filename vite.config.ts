@@ -3230,11 +3230,9 @@ async function dockerContainerExists(name: string): Promise<boolean> {
 async function containersForJobProcesses(processes: AgentProcessEvent[]): Promise<AgentJobContainer[]> {
   const containers = await Promise.all(
     processes.map(async (processEvent) => {
-      const names = uniqueStrings([
-        ...(processEvent.dockerContainers ?? []),
-        ...(await findDockerContainersForProcess(processEvent.pid, processEvent.pgid))
-      ]);
-      return names.map((name) => ({ name, source: "docker-name" as const }));
+      const directContainers = uniqueStrings(processEvent.dockerContainers ?? []).map((name) => ({ name, source: "docker-name" as const }));
+      const detectedContainers = await findDockerContainerDetailsForProcess(processEvent.pid, processEvent.pgid);
+      return mergeJobContainers([...directContainers, ...detectedContainers]);
     })
   );
   return mergeJobContainers(containers.flat());
@@ -3797,7 +3795,7 @@ function detectDockerComposeProjects(argsText: string): string[] {
   return uniqueStrings(projects.filter((name) => !name.startsWith("-")));
 }
 
-async function findDockerContainersForProcess(pid: number | undefined, pgid: number | undefined): Promise<string[]> {
+async function findDockerContainerDetailsForProcess(pid: number | undefined, pgid: number | undefined): Promise<AgentJobContainer[]> {
   if (process.platform === "win32" || (!pid && !pgid)) {
     return [];
   }
@@ -3809,14 +3807,24 @@ async function findDockerContainersForProcess(pid: number | undefined, pgid: num
       .filter((match): match is RegExpMatchArray => Boolean(match))
       .filter((match) => Number(match[1]) === pid || Number(match[3]) === pgid)
       .map((match) => match[4]);
-    const names = matchingArgs.flatMap((argsText) => detectDockerContainers(argsText));
-    const composeNames = (
-      await Promise.all(matchingArgs.flatMap((argsText) => detectDockerComposeProjects(argsText)).map((project) => listDockerComposeContainers(project)))
+    const directContainers = matchingArgs
+      .flatMap((argsText) => detectDockerContainers(argsText))
+      .map((name) => ({ name, source: "docker-name" as const }));
+    const composeContainers = (
+      await Promise.all(
+        matchingArgs
+          .flatMap((argsText) => detectDockerComposeProjects(argsText))
+          .map(async (project) => (await listDockerComposeContainers(project)).map((name) => ({ name, source: "compose-project" as const, project })))
+      )
     ).flat();
-    return uniqueStrings([...names, ...composeNames]);
+    return mergeJobContainers([...directContainers, ...composeContainers]);
   } catch {
     return [];
   }
+}
+
+async function findDockerContainersForProcess(pid: number | undefined, pgid: number | undefined): Promise<string[]> {
+  return (await findDockerContainerDetailsForProcess(pid, pgid)).map((container) => container.name);
 }
 
 async function listDockerComposeContainers(project: string): Promise<string[]> {
