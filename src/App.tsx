@@ -3778,6 +3778,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         setStopNotice(`Stop result: ${stopResultSummary(payload.stopResult)}`);
       }
       setFilter("recent");
+      setQuery(jobFocusQuery(payload.job ?? job));
       setSelectedJobId(job.id);
     } catch (stopFailure) {
       setStopError(stopFailure instanceof Error ? stopFailure.message : "Failed to stop job.");
@@ -5285,6 +5286,10 @@ function jobSearchText(job: AgentJob): string {
     .filter(Boolean)
     .join("\n")
     .toLowerCase();
+}
+
+function jobFocusQuery(job: AgentJob): string {
+  return job.historyPath ?? job.artifacts[0]?.path ?? job.title;
 }
 
 function compareJobs(left: AgentJob, right: AgentJob, sort: JobSort): number {

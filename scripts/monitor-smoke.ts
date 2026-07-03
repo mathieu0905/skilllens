@@ -79,6 +79,7 @@ const baseEvidenceFeatures = [
   "job-progress-and-artifact-tail",
   "safe-stop-preview",
   "safe-stop-result",
+  "stopped-job-focused",
   "artifact-readable-label",
   "recent-history",
   "issues-filter",
@@ -228,6 +229,24 @@ async function main() {
       await clickEnabledButton(browser, "Execute stop", 15000);
       await browser.waitForText("Stop result", 45000);
       await captureEvidence(browser, "05-stop-result-visible.png", "safe-stop-result", "stop result shows killed processes, removed containers, residual checks, and cleanup errors");
+      const stoppedFocus = await browser.evaluate(`
+        (() => {
+          const input = document.querySelector('input[aria-label="Search jobs"]');
+          const summary = document.querySelector('.job-list-summary');
+          const selected = document.querySelector('.job-card.selected');
+          return {
+            ok: input instanceof HTMLInputElement &&
+              input.value.includes('fake-codex-output.log') &&
+              (summary?.textContent || '').includes('Showing 1 matching job') &&
+              (selected?.textContent || '').includes('Stop'),
+            query: input instanceof HTMLInputElement ? input.value : '',
+            summary: summary?.textContent || '',
+            selected: selected?.textContent || ''
+          };
+        })()
+      `);
+      assert(stoppedFocus.result?.value?.ok === true, `stopped job should be focused in recent history: ${JSON.stringify(stoppedFocus.result?.value)}`);
+      await captureEvidence(browser, "05aa-stopped-job-focused.png", "stopped-job-focused", "after a stop, Recent history is filtered to the stopped job instead of a long history list");
       const copiedPath = await browser.evaluate(`
         (() => {
           const button = [...document.querySelectorAll('button')]
