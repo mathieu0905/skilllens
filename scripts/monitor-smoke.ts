@@ -137,15 +137,7 @@ async function main() {
       await browser.waitForText("Stop preview", 15000);
       await captureEvidence(browser, "04-stop-preview-visible.png", "safe-stop-preview", "preview lists protected root, process targets, and container targets before execution");
 
-      const clicked = await browser.evaluate(`
-        (() => {
-          const buttons = [...document.querySelectorAll('button')];
-          const button = buttons.find((item) => (item.textContent || '').includes('Execute stop'));
-          button?.click();
-          return button ? 'clicked-stop' : 'missing-stop-button';
-        })()
-      `);
-      assert(clicked.result?.value === "clicked-stop", `expected job stop button, got ${clicked.result?.value}`);
+      await clickEnabledButton(browser, "Execute stop", 15000);
       await browser.waitForText("Stop result", 15000);
       await captureEvidence(browser, "05-stop-result-visible.png", "safe-stop-result", "stop result shows killed processes, removed containers, residual checks, and cleanup errors");
     } finally {
@@ -278,6 +270,27 @@ async function captureRecentHistoryEvidence(filePath: string, screenshotName: st
   }
 }
 
+async function clickEnabledButton(browser: BrowserSession, label: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await browser.evaluate(`
+      (() => {
+        const button = [...document.querySelectorAll('button')]
+          .find((item) => (item.textContent || '').includes(${JSON.stringify(label)}));
+        if (!(button instanceof HTMLButtonElement)) return 'missing';
+        if (button.disabled) return 'disabled';
+        button.click();
+        return 'clicked';
+      })()
+    `);
+    if (result.result?.value === "clicked") {
+      return;
+    }
+    await sleep(300);
+  }
+  throw new Error(`timed out waiting for enabled button: ${label}`);
+}
+
 async function captureEvidence(browser: BrowserSession, screenshotName: string, feature: string, assertion: string) {
   const screenshotPath = path.join(runScreenshotDir, screenshotName);
   await browser.screenshot(screenshotPath);
@@ -357,7 +370,7 @@ set -euo pipefail
 artifact="$1"
 mkdir -p "$(dirname "$artifact")"
 echo "fake-codex-root $$" >> "$artifact"
-setsid bash -lc 'artifact="$1"; for i in $(seq 1 24); do echo "fake-codex-smoke-step-$i" >> "$artifact"; sleep 2; done' bash "$artifact" &
+setsid bash -lc 'artifact="$1"; for i in $(seq 1 60); do echo "fake-codex-smoke-step-$i" >> "$artifact"; sleep 2; done' bash "$artifact" &
 child=$!
 wait "$child"
 `,
@@ -454,14 +467,7 @@ wait "$child"
       await browser.waitForText("Stop preview", 15000);
       await browser.waitForText(name, 15000);
       await captureEvidence(browser, "09-docker-stop-preview-visible.png", "docker-stop-preview", "docker stop preview lists the detached container to remove");
-      const clicked = await browser.evaluate(`
-        (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Execute stop'));
-          button?.click();
-          return button ? 'clicked-stop' : 'missing-stop-button';
-        })()
-      `);
-      assert(clicked.result?.value === "clicked-stop", `frontend should expose a job stop action for docker job, got ${clicked.result?.value}`);
+      await clickEnabledButton(browser, "Execute stop", 15000);
       await browser.waitForText("Stop result", 15000);
       await captureEvidence(browser, "10-docker-stop-result-visible.png", "docker-stop-result", "docker stop result shows container removal and residual container check");
     } finally {
@@ -539,14 +545,7 @@ wait "$child"
       await browser.waitForText("Stop preview", 15000);
       await browser.waitForText(name, 15000);
       await captureEvidence(browser, "13-docker-codex-exec-stop-preview.png", "docker-codex-exec-stop-preview", "docker codex-exec stop preview lists process and container cleanup targets");
-      const clicked = await browser.evaluate(`
-        (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Execute stop'));
-          button?.click();
-          return button ? 'clicked-stop' : 'missing-stop-button';
-        })()
-      `);
-      assert(clicked.result?.value === "clicked-stop", `frontend should expose a job stop action for docker codex-exec job, got ${clicked.result?.value}`);
+      await clickEnabledButton(browser, "Execute stop", 15000);
       await browser.waitForText("Stop result", 15000);
       await captureEvidence(browser, "14-docker-codex-exec-stop-result.png", "docker-codex-exec-stop-result", "docker codex-exec stop result shows cleanup and residual checks");
     } finally {

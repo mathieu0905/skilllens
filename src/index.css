@@ -2348,6 +2348,33 @@ textarea {
   gap: 10px;
 }
 
+.job-notice {
+  margin-top: 12px;
+  border: 1px solid #b7cdf7;
+  border-radius: 8px;
+  background: #f6f9ff;
+  color: #12468f;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.job-notice strong {
+  min-width: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.job-notice .icon-button {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  color: #12468f;
+  background: #ffffff;
+}
+
 .job-metric {
   border: 1px solid #d8dee8;
   border-radius: 8px;
@@ -2567,10 +2594,74 @@ textarea {
   padding-bottom: 12px;
 }
 
+.job-insight-grid {
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.job-insight {
+  min-width: 0;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 10px;
+}
+
+.job-insight span {
+  display: block;
+  color: #66778a;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.job-insight strong {
+  display: block;
+  margin-top: 4px;
+  color: #17202a;
+  font-size: 14px;
+}
+
+.job-insight p {
+  margin: 5px 0 0;
+  color: #405065;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.job-insight.active {
+  border-color: #b7cdf7;
+  background: #f6f9ff;
+}
+
+.job-insight.stale {
+  border-color: #f3c780;
+  background: #fffaf0;
+}
+
+.job-insight.failed {
+  border-color: #f2b8b5;
+  background: #fffafa;
+}
+
+.job-insight.stopped {
+  border-color: #c7b9ee;
+  background: #fbf9ff;
+}
+
 .job-detail-summary {
   padding: 10px 12px 0;
   display: grid;
   gap: 4px;
+}
+
+.job-detail-summary span {
+  color: #66778a;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .job-detail section {
@@ -2620,6 +2711,29 @@ textarea {
 
 .job-detail-empty {
   padding: 14px;
+}
+
+.job-technical-details {
+  border-top: 1px solid #e3e8ef;
+}
+
+.job-technical-details summary {
+  cursor: pointer;
+  padding: 11px 12px;
+  color: #405065;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.job-technical-details section {
+  border-top: 1px solid #e3e8ef;
+}
+
+.job-technical-note {
+  margin: 0;
+  color: #405065;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .process-head {
@@ -3510,6 +3624,7 @@ textarea {
 
   .metrics,
   .job-metrics,
+  .job-insight-grid,
   .compare-grid {
     grid-template-columns: 1fr 1fr;
   }

@@ -3584,6 +3584,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
   const [stopPlans, setStopPlans] = useState<Record<string, AgentStopPlan>>({});
   const [stopResults, setStopResults] = useState<Record<string, AgentStopResult>>({});
   const [stopError, setStopError] = useState("");
+  const [stopNotice, setStopNotice] = useState("");
   const [stoppingJobId, setStoppingJobId] = useState("");
   const artifactTailsRef = useRef(artifactTails);
   const artifactPathsKey = useMemo(() => {
@@ -3767,6 +3768,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
       }
       if (payload.stopResult) {
         setStopResults((current) => ({ ...current, [job.id]: payload.stopResult! }));
+        setStopNotice(`Stop result: ${stopResultSummary(payload.stopResult)}`);
       }
       setFilter("recent");
       setSelectedJobId(job.id);
@@ -3793,6 +3795,14 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         </div>
         {error ? <p className="error-text process-message">{error}</p> : null}
         {stopError ? <p className="error-text process-message">{stopError}</p> : null}
+        {stopNotice ? (
+          <div className="job-notice">
+            <strong>{stopNotice}</strong>
+            <button className="icon-button" onClick={() => setStopNotice("")} aria-label="Dismiss stop result">
+              <XCircle size={15} />
+            </button>
+          </div>
+        ) : null}
         <div className="job-metrics">
           <JobMetric label="active jobs" value={metrics.active} tone="active" />
           <JobMetric label="stale jobs" value={metrics.stale} tone={metrics.stale ? "warn" : "normal"} />
@@ -3911,38 +3921,41 @@ function JobDetail({
   onPreview: () => void;
   onStop: () => void;
 }) {
+  const progress = progressWithTail(job, artifactTails);
+  const primaryArtifact = job.artifacts[0];
+  const stopSummary = stopResult ? stopResultSummary(stopResult) : stopPlan ? stopPlanSummary(stopPlan) : job.canStop ? "Preview the safe stop plan before stopping anything." : "Root agent is protected; no stoppable child task is available.";
   return (
     <div className="monitor-panel job-detail">
       <div className="stream-head">
         <strong>{job.title}</strong>
         <span>{job.status}</span>
       </div>
+      <div className="job-insight-grid">
+        <div className={`job-insight ${job.status}`}>
+          <span>Status</span>
+          <strong>{jobStatusLabel(job)}</strong>
+          <p>{jobStatusMessage(job)}</p>
+        </div>
+        <div className="job-insight">
+          <span>Latest activity</span>
+          <strong>{progress.label}</strong>
+          <p>{progress.latestLine ?? progress.detail}</p>
+        </div>
+        <div className={stopResult?.cleanupErrors.length ? "job-insight failed" : "job-insight"}>
+          <span>Safe stop</span>
+          <strong>{stopResult ? "Finished" : stopPlan ? "Ready" : job.canStop ? "Available" : "Protected"}</strong>
+          <p>{stopSummary}</p>
+        </div>
+      </div>
       <div className="job-detail-summary">
-        <code>{job.agentRoot?.label ?? "agent root unknown"} · protected</code>
-        <code>started {formatShortTime(job.startedAt)} · updated {formatShortTime(job.lastUpdatedAt)}</code>
-        <code>grouped by agent root and process group; stop only targets listed children and containers</code>
+        <span>{job.agentRoot?.label ?? "agent root unknown"} is protected</span>
+        <span>Started {formatShortTime(job.startedAt)} · Updated {formatShortTime(job.lastUpdatedAt)}</span>
+        {primaryArtifact ? <span>Primary artifact: {primaryArtifact.path}</span> : null}
         {job.historyPath ? <code>{job.historyPath}</code> : null}
       </div>
-      <JobProgress progress={progressWithTail(job, artifactTails)} />
+      <JobProgress progress={progress} />
       <section>
-        <h4>Process Tree</h4>
-        {job.processes.map((processEvent) => (
-          <div className={`process-row ${processEvent.status}`} key={processEvent.id}>
-            <div>
-              <strong>{processEvent.command}</strong>
-              <code>
-                pid {processEvent.pid ?? "?"}{processEvent.ppid ? ` · ppid ${processEvent.ppid}` : ""}
-                {processEvent.pgid ? ` · pgid ${processEvent.pgid}` : ""}
-              </code>
-              <p>{truncate(processEvent.args.join(" "), 220)}</p>
-              <small>{processEvent.canStop ? "stoppable child" : "protected"}</small>
-            </div>
-            <span>{processEvent.status}</span>
-          </div>
-        ))}
-      </section>
-      <section>
-        <h4>Artifacts Tail</h4>
+        <h4>Latest Output</h4>
         <div className="process-artifacts">
           {job.artifacts.length ? (
             job.artifacts.map((artifact) => {
@@ -3960,7 +3973,7 @@ function JobDetail({
         </div>
       </section>
       <section>
-        <h4>Docker Containers</h4>
+        <h4>Containers</h4>
         {job.containers.length ? (
           <div className="job-chip-row">{job.containers.map((container) => <span key={container.name}>{container.name}</span>)}</div>
         ) : (
@@ -3986,6 +3999,30 @@ function JobDetail({
         {stopPlan ? <StopPlanView plan={stopPlan} /> : null}
         {stopResult ? <StopResultView result={stopResult} /> : null}
       </section>
+      <details className="job-technical-details">
+        <summary>Technical details</summary>
+        <section>
+          <h4>Process Tree</h4>
+          {job.processes.map((processEvent) => (
+            <div className={`process-row ${processEvent.status}`} key={processEvent.id}>
+              <div>
+                <strong>{processEvent.command}</strong>
+                <code>
+                  pid {processEvent.pid ?? "?"}{processEvent.ppid ? ` · ppid ${processEvent.ppid}` : ""}
+                  {processEvent.pgid ? ` · pgid ${processEvent.pgid}` : ""}
+                </code>
+                <p>{truncate(processEvent.args.join(" "), 220)}</p>
+                <small>{processEvent.canStop ? "stoppable child" : "protected root or inherited process"}</small>
+              </div>
+              <span>{processEvent.status}</span>
+            </div>
+          ))}
+        </section>
+        <section>
+          <h4>Safety rule</h4>
+          <p className="job-technical-note">Stops only target child process groups and containers listed in the preview. Codex/Claude root agent groups stay protected.</p>
+        </section>
+      </details>
     </div>
   );
 }
@@ -4015,6 +4052,57 @@ function StopResultView({ result }: { result: AgentStopResult }) {
       {result.cleanupErrors.length ? <pre>{result.cleanupErrors.join("\n")}</pre> : <p>No cleanup errors.</p>}
     </div>
   );
+}
+
+function jobStatusLabel(job: AgentJob): string {
+  if (job.status === "active") {
+    return "Running";
+  }
+  if (job.status === "stale") {
+    return "Needs attention";
+  }
+  if (job.status === "stopped") {
+    return "Stopped";
+  }
+  if (job.status === "failed") {
+    return "Cleanup issue";
+  }
+  return "Recent";
+}
+
+function jobStatusMessage(job: AgentJob): string {
+  if (job.status === "active") {
+    return `${job.processes.length} processes tracked. Last update ${formatStaleAge(job.staleSeconds)}.`;
+  }
+  if (job.status === "stale") {
+    return `No artifact or log update for ${formatStaleAge(job.staleSeconds)}. It may still be running.`;
+  }
+  if (job.status === "stopped") {
+    return "Stopped safely and kept in Recent history.";
+  }
+  if (job.status === "failed") {
+    return "Stop or cleanup left errors. Check residual processes and containers below.";
+  }
+  return "Completed or no longer active. History and artifacts are kept here.";
+}
+
+function stopPlanSummary(plan: AgentStopPlan): string {
+  const processes = plan.processTargets.length;
+  const containers = plan.containers.length;
+  const parts = [
+    processes ? `${processes} child process target${processes === 1 ? "" : "s"}` : "",
+    containers ? `${containers} container${containers === 1 ? "" : "s"}` : ""
+  ].filter(Boolean);
+  return parts.length ? `Ready to stop ${parts.join(" and ")}. Root agent remains protected.` : "Nothing stoppable was found in this job.";
+}
+
+function stopResultSummary(result: AgentStopResult): string {
+  if (result.cleanupErrors.length) {
+    return `${result.cleanupErrors.length} cleanup issue${result.cleanupErrors.length === 1 ? "" : "s"} found.`;
+  }
+  const killed = result.killedProcesses.filter((item) => item.ok).length;
+  const removed = result.removedContainers.filter((item) => item.ok).length;
+  return `Clean stop: ${killed} process target${killed === 1 ? "" : "s"} and ${removed} container${removed === 1 ? "" : "s"} handled.`;
 }
 
 function JobProgress({ progress }: { progress: AgentJobProgress }) {
