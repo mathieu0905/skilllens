@@ -60,7 +60,7 @@ async function main() {
     ? []
     : discoverSkillPathsFromTrace(traceContent, projectCwd, repoRoot, options.maxAutoSkills);
   const captureId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${shortHash(session.path)}`;
-  const bundlePath = path.resolve(options.out ?? path.join(repoRoot, ".skilllens", "captures", captureId, "skilllens.capture.json"));
+  const bundlePath = path.resolve(options.out ?? path.join(repoRoot, ".skilllens", "captures", captureId, "skillscope.capture.json"));
   const reportOut = path.resolve(options.reportOut ?? path.join(repoRoot, ".skilllens", "reports", captureId));
 
   await mkdir(path.dirname(bundlePath), { recursive: true });
@@ -101,7 +101,7 @@ async function main() {
   appendOptional(captureArgs, "--agent-version", options.agentVersion ?? session.cliVersion);
   appendOptional(captureArgs, "--analysis-method", options.analysisMethod);
 
-  console.log(`SkillLens Codex session: ${session.path}`);
+  console.log(`SkillScope Codex session: ${session.path}`);
   console.log(`Project cwd: ${projectCwd}`);
   if (autoSkillPaths.length) {
     console.log(`Auto-detected skill files: ${autoSkillPaths.join(", ")}`);
@@ -115,13 +115,13 @@ async function main() {
     await run("npm", ["run", "analyze", "--", "--bundle", bundlePath, "--out", reportOut], repoRoot);
   }
 
-  if (!options.noOpen && process.env.SKILLLENS_NO_OPEN !== "1") {
+  if (!options.noOpen && process.env.SKILLSCOPE_NO_OPEN !== "1") {
     await run("npm", ["run", "open", "--", "--port", String(options.port), "--capture", captureId], repoRoot);
   }
 
-  console.log(`SkillLens bundle: ${bundlePath}`);
+  console.log(`SkillScope bundle: ${bundlePath}`);
   if (options.analyze) {
-    console.log(`SkillLens report: ${reportOut}`);
+    console.log(`SkillScope report: ${reportOut}`);
   }
 }
 
@@ -339,7 +339,7 @@ function discoverSkillPathsFromTrace(traceContent: string, projectCwd: string, r
       if (!existsSync(resolved)) {
         continue;
       }
-      if (isInside(resolved, path.join(root, "integrations", "skilllens-codex"))) {
+      if (isInside(resolved, path.join(root, "integrations", "skillscope-codex"))) {
         continue;
       }
       candidates.add(resolved);
@@ -352,7 +352,7 @@ function discoverSkillPathsFromTrace(traceContent: string, projectCwd: string, r
 }
 
 function isLikelySkillReadEvent(name: string | null, content: string): boolean {
-  if (isSkillLensCommand(content)) {
+  if (isSkillScopeCommand(content)) {
     return false;
   }
   const lowerName = (name ?? "").toLowerCase();
@@ -364,8 +364,8 @@ function isLikelySkillReadEvent(name: string | null, content: string): boolean {
     /\b(rg|grep)\b[^;&|]*\b(?:skill\.md|claude\.md|agents\.md|\.skill\.md)\b/.test(lowerContent);
 }
 
-function isSkillLensCommand(content: string): boolean {
-  return /\b(skilllens|capture-codex\.sh|npm\s+(?:--prefix\s+\S+\s+)?run\s+(?:codex|capture|analyze))\b/i.test(content);
+function isSkillScopeCommand(content: string): boolean {
+  return /\b(skillscope|npm\s+(?:--prefix\s+\S+\s+)?run\s+(?:codex|capture|analyze))\b/i.test(content);
 }
 
 function extractSkillLikePaths(text: string): string[] {
@@ -448,7 +448,7 @@ function run(command: string, args: string[], cwd: string): Promise<void> {
 }
 
 function printNoSession(projectCwd: string, codexHome: string) {
-  console.error("SkillLens could not identify a Codex session trace.");
+  console.error("SkillScope could not identify a Codex session trace.");
   console.error(`Project cwd: ${projectCwd}`);
   console.error(`Codex home: ${codexHome}`);
   console.error("Run again with --trace /path/to/rollout-session.jsonl if this session is not under ~/.codex/sessions.");

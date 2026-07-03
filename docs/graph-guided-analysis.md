@@ -1,6 +1,6 @@
 # Graph-Guided Skill Analysis
 
-SkillLens analyzes skills with a program-analysis mindset.
+SkillScope analyzes skills with a program-analysis mindset.
 
 The core idea is:
 
@@ -73,4 +73,3 @@ Coverage is path-sensitive:
 
 The same model works for Codex, Claude Code, ACP/SkillsBench-style JSONL, and
 manual capture bundles because all traces are normalized before fact extraction.
-

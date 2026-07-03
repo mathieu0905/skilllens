@@ -1,17 +1,17 @@
 {
-  "name": "skilllens",
+  "name": "agent-skill-scope",
   "version": "0.1.0",
   "type": "module",
-  "description": "Visual coverage for agent skills.",
+  "description": "Graph-guided coverage and trace evidence for agent skills.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mathieu0905/skilllens.git"
+    "url": "https://github.com/mathieu0905/agent-skill-scope.git"
   },
   "bugs": {
-    "url": "https://github.com/mathieu0905/skilllens/issues"
+    "url": "https://github.com/mathieu0905/agent-skill-scope/issues"
   },
-  "homepage": "https://github.com/mathieu0905/skilllens#readme",
+  "homepage": "https://github.com/mathieu0905/agent-skill-scope#readme",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",

@@ -1,0 +1,22 @@
+{
+  "name": "skillscope-codex",
+  "version": "0.1.0",
+  "description": "Launch SkillScope from Codex and capture sessions for skill coverage analysis.",
+  "author": {
+    "name": "SkillScope"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "SkillScope Codex",
+    "shortDescription": "Open SkillScope for Codex skill coverage.",
+    "longDescription": "SkillScope Codex launches the browser viewer from Codex, packages Codex session traces, loaded SKILL.md files, task metadata, and result metadata into a SkillScope capture bundle, then runs coverage analysis.",
+    "developerName": "SkillScope",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "defaultPrompt": [
+      "/skillscope",
+      "Open SkillScope for this Codex session.",
+      "Analyze this skill with SkillScope."
+    ]
+  }
+}

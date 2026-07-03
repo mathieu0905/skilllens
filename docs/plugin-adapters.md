@@ -1,6 +1,6 @@
 # Codex And Claude Code Adapter Plan
 
-SkillLens should support Codex and Claude Code without forking the analyzer.
+SkillScope should support Codex and Claude Code without forking the analyzer.
 The stable boundary is a plugin-emitted capture bundle plus the normalized
 analysis schema:
 
@@ -19,8 +19,8 @@ Expected captured inputs:
 
 Adapter behavior:
 
-- Let users start capture from Codex with `/skilllens`.
-- Install `/skilllens` as a Codex custom prompt, not as an unsupported plugin manifest field.
+- Let users start capture from Codex with `/skillscope`.
+- Install `/skillscope` as a Codex custom prompt, not as an unsupported plugin manifest field.
 - Resolve the active trace from `~/.codex/sessions/**/rollout-*.jsonl`, preferring `session_meta.payload.cwd === project cwd`.
 - Treat skill files found in assistant tool calls as trace-proven loaded skills.
 - Map `tool_calls[].name` and `tool_calls[].arguments` into `TraceEvent.name` and `TraceEvent.content`
@@ -50,7 +50,7 @@ The current CLI exposes:
 
 ```bash
 npm run analyze -- \
-  --bundle skilllens.capture.json \
+  --bundle skillscope.capture.json \
   --out report/
 ```
 

@@ -1,35 +1,37 @@
-# SkillLens Claude Code Command
+# SkillScope Claude Code Command
 
-This directory contains a Claude Code command template for SkillLens capture and browser launch.
+This directory contains a Claude Code command template for SkillScope capture and browser launch.
 
 Copy or symlink:
 
 ```text
-integrations/claude-code/.claude/commands/skilllens-capture.md
+integrations/claude-code/.claude/commands/skillscope.md
 ```
 
-into a project-level `.claude/commands/` directory, then use it to produce:
+into a project-level `.claude/commands/` directory, then run:
 
 ```text
-skilllens.capture.json
+/skillscope
 ```
 
-The wrapper script calls the shared capture CLI:
+The command calls the shared capture CLI:
 
 ```bash
-integrations/claude-code/scripts/capture-claude-code.sh \
+npm run capture -- \
+  --agent claude_code \
   --trace <claude-session.jsonl> \
   --skill <path-to-SKILL.md> \
-  --out skilllens.capture.json
+  --out skillscope.capture.json
 ```
 
 Then:
 
 ```bash
-npm run analyze -- --bundle skilllens.capture.json --out skilllens-report
+npm run analyze -- --bundle skillscope.capture.json --out skillscope-report
+npm run open
 ```
 
-The browser UI reads `.skilllens/registry.json` and auto-loads the latest captured session. Set `SKILLLENS_NO_OPEN=1` to skip launching the browser.
+The browser UI reads `.skilllens/registry.json` and auto-loads the latest captured session. Set `SKILLSCOPE_NO_OPEN=1` to skip launching the browser.
 
 The command should pass explicit `--skill` paths for files known to be loaded
 or intentionally used in the session. Directory scanning is available, but it is

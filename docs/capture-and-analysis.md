@@ -1,13 +1,13 @@
 # Plugin-First Capture And Analysis
 
-SkillLens should not depend on users manually finding the right `SKILL.md` and
+SkillScope should not depend on users manually finding the right `SKILL.md` and
 trace file after a run. The reliable path is plugin-first:
 
 1. A Codex or Claude Code integration runs inside the agent environment.
 2. It records which skill/rule/memory files were loaded for the session.
 3. It records the exact trace/session artifact produced by that run.
-4. It writes a `skilllens.capture.json` bundle.
-5. SkillLens analyzes the bundle and renders the source-level coverage view.
+4. It writes a `skillscope.capture.json` bundle.
+5. SkillScope analyzes the bundle and renders the source-level coverage view.
 
 ## Capture Bundle
 
@@ -58,7 +58,7 @@ The plugin should emit:
 The analyzer already accepts this:
 
 ```bash
-npm run analyze -- --bundle skilllens.capture.json --out report/
+npm run analyze -- --bundle skillscope.capture.json --out report/
 ```
 
 ## Why Plugin Capture Matters
@@ -119,15 +119,16 @@ of marking the whole sentence as a single block.
 
 ### Level 2: Agent-Native Judge
 
-SkillLens does not need a separate model API for judgment. The browser button
+SkillScope does not need a separate model API for judgment. The browser button
 starts the agent runner that matches the captured session:
 
 - Codex captures are judged with `codex exec`.
 - Claude Code captures are judged with `claude -p`.
 
-The runner is guided by `skills/skilllens-agent-judge/SKILL.md`. That skill is
-the judgment contract: it tells the agent to focus on one selected skill-use
-window, one constraint at a time, and exact trace evidence event IDs.
+The runner is guided by `skills/skillscope-analyzer/SKILL.md`. That skill is the
+analysis contract: it tells the agent to compile constraints, build a skill
+graph, inspect trace facts, cite concrete event IDs, and write a conservative
+rewrite proposal when evidence supports one.
 
 The judge is still candidate-only:
 
@@ -148,21 +149,21 @@ the user must be able to mark a finding wrong and export the corrected report.
 
 The Codex plugin should be thin:
 
-- expose a Codex slash prompt named `/skilllens`
+- expose a Codex slash prompt named `/skillscope`
 - discover the active rollout JSONL under `~/.codex/sessions`
 - discover active skill/rules files from trace-proven `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, or `*.skill.md` reads
-- write `skilllens.capture.json`
+- write `skillscope.capture.json`
 - invoke `npm run analyze -- --bundle ...`
-- open the local report or pass it to the SkillLens web app
+- open the local report or pass it to the SkillScope web app
 
 It should not duplicate coverage logic.
 
 Codex plugin manifests should not add unsupported `slashCommands` fields. The
 slash-style entry is implemented through a custom prompt installed at
-`~/.codex/prompts/skilllens.md`, which tells Codex to run the local launcher:
+`~/.codex/prompts/skillscope.md`, which tells Codex to run the local launcher:
 
 ```bash
-npm --prefix <SkillLens repo> run codex -- --project-cwd "$(pwd)"
+npm --prefix <SkillScope repo> run codex -- --project-cwd "$(pwd)"
 ```
 
 ## Claude Code Integration Shape
@@ -171,7 +172,7 @@ The Claude Code integration should follow the same contract:
 
 - discover the loaded `SKILL.md`/project instructions for the run
 - capture Claude Code JSONL message entries, including `tool_use` and `tool_result`
-- write the same `skilllens.capture.json`
+- write the same `skillscope.capture.json`
 - call the shared analyzer
 
 The only product-specific code should be capture and normalization adapters.
@@ -182,11 +183,11 @@ Implemented:
 
 - shared `CaptureBundle` type
 - `npm run analyze -- --bundle ...`
-- Codex `/skilllens` custom prompt template and local launcher
+- Codex `/skillscope` custom prompt template and local launcher
 - Codex/Claude/ACP/generic trace normalization
 - local heuristic coverage
 - source-level `SKILL.md` highlighting with evidence hover
-- browser-triggered agent-native judge path using `skills/skilllens-agent-judge/SKILL.md`
+- browser-triggered agent-native judge path using `skills/skillscope-analyzer/SKILL.md`
 
 Not implemented yet:
 

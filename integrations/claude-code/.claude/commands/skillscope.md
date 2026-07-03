@@ -1,11 +1,11 @@
-# SkillLens Capture
+# SkillScope
 
-Capture the current Claude Code run for SkillLens skill coverage analysis.
+Capture the current Claude Code run for SkillScope skill coverage analysis, then open the SkillScope browser UI.
 
 ## Use When
 
 - The user asks whether a `SKILL.md`, rule, or instruction file was actually followed.
-- The user wants a SkillLens report for a Claude Code session.
+- The user wants a SkillScope report for a Claude Code session.
 - The user wants to compare with-skill vs no-skill or success vs failure trajectories.
 
 ## Required Inputs
@@ -18,7 +18,7 @@ Ask for missing paths instead of guessing:
 
 ## Command
 
-From the SkillLens repository root:
+From the SkillScope repository root:
 
 ```bash
 npm run capture -- \
@@ -27,25 +27,26 @@ npm run capture -- \
   --skill <path-to-SKILL.md> \
   --task <optional-task.md> \
   --result <optional-result.json> \
-  --out skilllens.capture.json
+  --out skillscope.capture.json
 ```
 
 Then analyze:
 
 ```bash
-npm run analyze -- --bundle skilllens.capture.json --out skilllens-report
+npm run analyze -- --bundle skillscope.capture.json --out skillscope-report
 ```
 
-If this command file is used from the SkillLens checkout, the wrapper captures the bundle and opens the SkillLens browser UI:
+If this command file is used from the SkillScope checkout, use the shared capture CLI directly:
 
 ```bash
-integrations/claude-code/scripts/capture-claude-code.sh \
+npm run capture -- \
+  --agent claude_code \
   --trace <claude-session.jsonl> \
   --skill <path-to-SKILL.md> \
-  --out skilllens.capture.json
+  --out skillscope.capture.json
 ```
 
-Set `SKILLLENS_NO_OPEN=1` to capture without opening the browser.
+Then run `npm run open` to launch the browser UI if it is not already open.
 
 ## Boundaries
 

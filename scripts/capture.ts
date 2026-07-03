@@ -90,14 +90,14 @@ async function main() {
 
   const outPath = options.out
     ? path.resolve(cwd, options.out)
-    : path.join(registryRoot, ".skilllens", "captures", captureId, "skilllens.capture.json");
+    : path.join(registryRoot, ".skilllens", "captures", captureId, "skillscope.capture.json");
   await mkdir(path.dirname(outPath), { recursive: true });
   await writeFile(outPath, `${JSON.stringify(bundle, null, 2)}\n`);
   await updateRegistry(registryRoot, outPath, captureId, bundle);
 
   const loadedCount = skills.filter((skill) => skill.loaded).length;
   const discoveredCount = skills.length - loadedCount;
-  console.log(`SkillLens captured ${loadedCount} loaded skill artifact(s), ${discoveredCount} discovered artifact(s), and 1 trace.`);
+  console.log(`SkillScope captured ${loadedCount} loaded skill artifact(s), ${discoveredCount} discovered artifact(s), and 1 trace.`);
   console.log(`Trace format: ${bundle.trace.format}`);
   console.log(`Session segments: ${bundle.trace.segments?.length ?? 0}`);
   console.log(`Wrote ${outPath}`);
@@ -517,8 +517,8 @@ function shortHash(value: string): string {
 
 function printUsage() {
   console.log(`Usage:
-  npm run capture -- --agent codex --trace session.jsonl --skill SKILL.md --out skilllens.capture.json
-  npm run capture -- --agent claude_code --trace transcript.jsonl --skills-dir .claude/skills --out skilllens.capture.json
+  npm run capture -- --agent codex --trace session.jsonl --skill SKILL.md --out skillscope.capture.json
+  npm run capture -- --agent claude_code --trace transcript.jsonl --skills-dir .claude/skills --out skillscope.capture.json
 
 Options:
   --agent                  codex | claude_code | unknown

@@ -26,7 +26,7 @@ async function main() {
     return;
   }
 
-  const outDir = options.out ?? "skilllens-report";
+  const outDir = options.out ?? "skillscope-report";
   const project = options.bundle
     ? createProjectFromCaptureBundle(JSON.parse(await readFile(options.bundle, "utf8")) as CaptureBundle)
     : await createProjectFromFiles(options);
@@ -38,7 +38,7 @@ async function main() {
 
   const covered = project.findings.filter((finding) => finding.status === "covered").length;
   const risky = project.findings.filter((finding) => finding.status === "missed" || finding.status === "violated").length;
-  console.log(`SkillLens analyzed ${project.units.length} skill units and ${project.events.length} trace events.`);
+  console.log(`SkillScope analyzed ${project.units.length} skill units and ${project.events.length} trace events.`);
   console.log(`Trace format: ${project.traceFormat}`);
   console.log(`Covered: ${covered}; missed or violated: ${risky}`);
   console.log(`Wrote ${outDir}/analysis.json, ${outDir}/report.md, and ${outDir}/report.html`);
@@ -104,10 +104,10 @@ function normalizeSource(value: string | undefined): SkillLensProject["sourceTyp
 function printUsage() {
   console.log(`Usage:
   npm run analyze -- --skill SKILL.md --trace session.jsonl --out report/
-  npm run analyze -- --bundle skilllens.capture.json --out report/
+  npm run analyze -- --bundle skillscope.capture.json --out report/
 
 Options:
-  --bundle  Path to a SkillLens capture bundle emitted by a plugin
+  --bundle  Path to a SkillScope capture bundle emitted by a plugin
   --skill   Path to SKILL.md or rules markdown
   --trace   Path to Codex, Claude Code, ACP, or generic JSONL trace
   --result  Optional result.json
