@@ -4168,6 +4168,8 @@ function JobDetail({
           </div>
         ) : null}
       </div>
+      {stopPlan ? <StopPlanView plan={stopPlan} /> : null}
+      {stopResult ? <StopResultView result={stopResult} /> : null}
       {sourceProcess || primaryArtifact || job.historyPath ? (
         <div className="job-detail-summary job-detail-context">
           {sourceProcess ? (
@@ -4237,8 +4239,6 @@ function JobDetail({
         ) : (
           <p className="muted stream-empty">Root agent is protected; no stoppable child task is available.</p>
         )}
-        {stopPlan ? <StopPlanView plan={stopPlan} /> : null}
-        {stopResult ? <StopResultView result={stopResult} /> : null}
       </section>
       <details className="job-technical-details">
         <summary>Technical details</summary>

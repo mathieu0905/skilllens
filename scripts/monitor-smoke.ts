@@ -212,6 +212,17 @@ async function main() {
       `);
       assert(previewed.result?.value === true, "stop preview button should be visible");
       await browser.waitForText("Stop preview", 15000);
+      const stopPreviewVisible = await browser.evaluate(`
+        (() => {
+          const plan = [...document.querySelectorAll('.stop-plan')]
+            .find((node) => (node.textContent || '').includes('Stop preview'));
+          if (!plan) return false;
+          const rect = plan.getBoundingClientRect();
+          const text = plan.textContent || '';
+          return rect.top >= 0 && rect.bottom <= window.innerHeight && text.includes('Will stop') && text.includes('Will not touch');
+        })()
+      `);
+      assert(stopPreviewVisible.result?.value === true, "stop preview target list should be visible in the screenshot viewport");
       await captureEvidence(browser, "04-stop-preview-visible.png", "safe-stop-preview", "preview lists protected root, process targets, and container targets before execution");
 
       await clickEnabledButton(browser, "Execute stop", 15000);
