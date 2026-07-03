@@ -67,6 +67,7 @@ const baseEvidenceFeatures = [
   "artifact-copy-actions",
   "job-search",
   "job-search-clear",
+  "empty-state-navigation",
   "job-sort",
   "live-refresh-toggle",
   "job-progress-and-artifact-tail",
@@ -203,6 +204,33 @@ async function runStaleJobCase() {
     const staleJob = await waitForJob((item) => hasArtifact(item, staleArtifact) && item.status === "stale", 45000);
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
+      const emptySearch = await browser.evaluate(`
+        (() => {
+          const activeButton = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Active'));
+          activeButton?.click();
+          const input = document.querySelector('input[aria-label="Search jobs"]');
+          if (!(input instanceof HTMLInputElement)) return 'missing-search';
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+          setter?.call(input, 'no-such-monitor-job-for-empty-state');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          return 'ok';
+        })()
+      `);
+      assert(emptySearch.result?.value === "ok", `empty-state search setup failed: ${emptySearch.result?.value}`);
+      await browser.waitForText("No matching jobs", 15000);
+      await browser.waitForText("Show issues", 15000);
+      await captureEvidence(browser, "06-empty-state-navigation.png", "empty-state-navigation", "empty search states can route directly to jobs needing attention");
+      const clearedEmptySearch = await browser.evaluate(`
+        (() => {
+          const button = document.querySelector('button[aria-label="Clear search"]') || [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Clear search'));
+          if (!(button instanceof HTMLButtonElement)) return 'missing-clear';
+          button.click();
+          return 'ok';
+        })()
+      `);
+      assert(clearedEmptySearch.result?.value === "ok", `empty-state search clear failed: ${clearedEmptySearch.result?.value}`);
+      await waitForSearchValue(browser, "", 5000);
+
       const issuesClicked = await browser.evaluate(`
         (() => {
           const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Issues'));

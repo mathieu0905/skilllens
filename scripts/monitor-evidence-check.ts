@@ -28,6 +28,7 @@ const baseEvidenceFeatures = [
   "artifact-copy-actions",
   "job-search",
   "job-search-clear",
+  "empty-state-navigation",
   "job-sort",
   "live-refresh-toggle",
   "job-progress-and-artifact-tail",

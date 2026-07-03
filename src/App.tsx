@@ -3900,6 +3900,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
               metrics={metrics}
               onClearQuery={() => setQuery("")}
               onShowActive={() => setFilter("active")}
+              onShowIssues={() => setFilter("issues")}
               onShowRecent={() => setFilter("recent")}
               onShowDocker={() => setFilter("docker")}
               onRefresh={() => setReloadNonce((value) => value + 1)}
@@ -3924,6 +3925,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
             query={query}
             metrics={metrics}
             onClearQuery={() => setQuery("")}
+            onShowIssues={() => setFilter("issues")}
             onShowRecent={() => setFilter("recent")}
             onRefresh={() => setReloadNonce((value) => value + 1)}
           />
@@ -3939,6 +3941,7 @@ function JobEmptyState({
   metrics,
   onClearQuery,
   onShowActive,
+  onShowIssues,
   onShowRecent,
   onShowDocker,
   onRefresh
@@ -3948,6 +3951,7 @@ function JobEmptyState({
   metrics: { active: number; stale: number; issues: number; recent: number; dockerJobs: number };
   onClearQuery: () => void;
   onShowActive: () => void;
+  onShowIssues: () => void;
   onShowRecent: () => void;
   onShowDocker: () => void;
   onRefresh: () => void;
@@ -3966,6 +3970,11 @@ function JobEmptyState({
         {filter !== "active" && metrics.active ? (
           <button className="secondary-button" onClick={onShowActive}>
             Show active
+          </button>
+        ) : null}
+        {filter !== "issues" && metrics.issues ? (
+          <button className="secondary-button" onClick={onShowIssues}>
+            Show issues
           </button>
         ) : null}
         {filter !== "recent" && metrics.recent ? (
@@ -3992,13 +4001,15 @@ function JobDetailEmpty({
   query,
   metrics,
   onClearQuery,
+  onShowIssues,
   onShowRecent,
   onRefresh
 }: {
   filter: JobFilter;
   query: string;
-  metrics: { recent: number };
+  metrics: { issues?: number; recent: number };
   onClearQuery: () => void;
+  onShowIssues: () => void;
   onShowRecent: () => void;
   onRefresh: () => void;
 }) {
@@ -4010,6 +4021,11 @@ function JobDetailEmpty({
         {query.trim() ? (
           <button className="secondary-button" onClick={onClearQuery}>
             Clear search
+          </button>
+        ) : null}
+        {filter !== "issues" && metrics.issues ? (
+          <button className="secondary-button" onClick={onShowIssues}>
+            Show issues
           </button>
         ) : null}
         {filter !== "recent" && metrics.recent ? (
