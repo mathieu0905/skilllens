@@ -439,6 +439,7 @@ async function runStaleJobCase() {
     } finally {
       await browser.close();
     }
+    await postJsonExpectFailure(`/api/agent-jobs/${encodeURIComponent(staleJob.id)}/stop`, { signal: "SIGTERM" }, "preview stop before executing");
     await postJson(`/api/agent-jobs/${encodeURIComponent(staleJob.id)}/stop/preview`, {});
     await postJson(`/api/agent-jobs/${encodeURIComponent(staleJob.id)}/stop`, { signal: "SIGTERM" });
   } finally {
@@ -1007,6 +1008,19 @@ async function postJson(pathname: string, body: unknown) {
     throw new Error(`POST ${pathname} failed: HTTP ${response.status} ${await response.text()}`);
   }
   return response.json();
+}
+
+async function postJsonExpectFailure(pathname: string, body: unknown, expected: string) {
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (response.ok) {
+    throw new Error(`POST ${pathname} should have failed before preview`);
+  }
+  const text = await response.text();
+  assert(text.includes(expected), `POST ${pathname} failed with unexpected message: ${text}`);
 }
 
 async function waitForProcess(predicate: (item: AgentProcessEvent) => boolean, timeoutMs: number): Promise<AgentProcessEvent> {

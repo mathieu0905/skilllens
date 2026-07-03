@@ -304,6 +304,7 @@ interface ProcessSnapshot {
 const LOCAL_TRACE_SCAN_LIMIT = Number.parseInt(process.env.SKILLLENS_LOCAL_TRACE_LIMIT ?? "1600", 10);
 const ANALYZER_VERSION = "skillscope-analyzer-native-target-reference-hints";
 const activeAgentProcesses = new Map<string, ActiveAgentProcess>();
+const agentJobStopPreviews = new Map<string, AgentStopPlan>();
 
 function skillLensCaptureApi() {
   return {
@@ -3085,7 +3086,9 @@ async function previewAgentJobStop(jobId: string): Promise<AgentStopPlan> {
   if (!job) {
     throw new Error("job is not active");
   }
-  return createAgentJobStopPlan(job);
+  const plan = await createAgentJobStopPlan(job);
+  agentJobStopPreviews.set(jobId, plan);
+  return plan;
 }
 
 async function stopAgentJob(jobId: string, signal: NodeJS.Signals): Promise<{ job: AgentJob; stopPlan: AgentStopPlan; stopResult: AgentStopResult }> {
@@ -3094,7 +3097,11 @@ async function stopAgentJob(jobId: string, signal: NodeJS.Signals): Promise<{ jo
   if (!job) {
     throw new Error("job is not active");
   }
-  const stopPlan = await createAgentJobStopPlan(job);
+  const stopPlan = agentJobStopPreviews.get(jobId);
+  if (!stopPlan) {
+    throw new Error("preview stop before executing");
+  }
+  agentJobStopPreviews.delete(jobId);
   const stopResult: AgentStopResult = {
     jobId,
     requestedAt: new Date().toISOString(),

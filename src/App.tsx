@@ -3590,6 +3590,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
   const [stopNotice, setStopNotice] = useState("");
   const [stoppingJobId, setStoppingJobId] = useState("");
   const artifactTailsRef = useRef(artifactTails);
+  const stoppedJobsRef = useRef(new Map<string, AgentJob>());
   const artifactPathsKey = useMemo(() => {
     const paths = jobs.flatMap((job) => job.artifacts.map((artifact) => artifact.path));
     return Array.from(new Set(paths)).sort().join("\n");
@@ -3658,7 +3659,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         }
         const payload = (await response.json()) as { jobs?: AgentJob[]; updatedAt?: string };
         if (!cancelled) {
-          setJobs((current) => mergeJobsWithLocalStopResults(payload.jobs ?? [], current));
+          setJobs((current) => mergeJobsWithLocalStopResults(payload.jobs ?? [], current, Array.from(stoppedJobsRef.current.values())));
           setUpdatedAt(payload.updatedAt ?? new Date().toISOString());
           setError("");
         }
@@ -3775,6 +3776,9 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         setStopNotice(`Stop result: ${stopResultSummary(payload.stopResult)}`);
       }
       const focusedJob = payload.job ?? (payload.stopResult ? stoppedJobFromResult(job, payload.stopResult, payload.stopPlan) : job);
+      if (focusedJob.lastStopResult) {
+        stoppedJobsRef.current.set(focusedJob.id, focusedJob);
+      }
       setJobs((current) => [focusedJob, ...current.filter((item) => item.id !== focusedJob.id)]);
       setFilter("recent");
       setQuery(jobFocusQuery(focusedJob));
@@ -5325,15 +5329,27 @@ function stoppedJobFromResult(job: AgentJob, stopResult: AgentStopResult, stopPl
   };
 }
 
-function mergeJobsWithLocalStopResults(next: AgentJob[], current: AgentJob[]): AgentJob[] {
+function mergeJobsWithLocalStopResults(next: AgentJob[], current: AgentJob[], stoppedJobs: AgentJob[] = []): AgentJob[] {
   const nextIds = new Set(next.map((job) => job.id));
-  const preserved = current.filter(
+  const localCandidates = [...stoppedJobs, ...current];
+  const preserved = localCandidates.filter(
     (job) =>
       !nextIds.has(job.id) &&
       Boolean(job.lastStopResult) &&
       (job.status === "stopped" || job.status === "failed")
   );
-  return preserved.length ? [...preserved, ...next] : next;
+  return preserved.length ? [...mergeUniqueJobs(preserved), ...next] : next;
+}
+
+function mergeUniqueJobs(jobs: AgentJob[]): AgentJob[] {
+  const seen = new Set<string>();
+  return jobs.filter((job) => {
+    if (seen.has(job.id)) {
+      return false;
+    }
+    seen.add(job.id);
+    return true;
+  });
 }
 
 function compareJobs(left: AgentJob, right: AgentJob, sort: JobSort): number {
