@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -24,6 +24,30 @@ interface MonitorPayload {
   updatedAt: string;
 }
 
+interface AgentJob {
+  id: string;
+  title: string;
+  status: "active" | "recent" | "stale" | "stopped" | "failed";
+  processes: AgentProcessEvent[];
+  containers: Array<{ name: string }>;
+  artifacts: Array<{ label: string; path: string; size?: number; mtime?: string }>;
+  canStop: boolean;
+  stopPlan?: unknown;
+  lastStopResult?: unknown;
+}
+
+interface JobPayload {
+  jobs: AgentJob[];
+  updatedAt: string;
+}
+
+interface ScreenshotEvidence {
+  feature: string;
+  assertion: string;
+  screenshot: string;
+  capturedAt: string;
+}
+
 const root = process.cwd();
 const baseUrl = process.env.SKILLSCOPE_URL ?? "http://127.0.0.1:5173";
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
@@ -31,6 +55,32 @@ const workDir = path.join(root, ".skilllens", "monitor-smoke", runId);
 const artifactPath = path.join(workDir, "fake-codex-output.log");
 const screenshotDir = path.join(root, ".skilllens", "monitor-smoke-screenshots");
 const runScreenshotDir = path.join(screenshotDir, runId);
+const evidencePath = path.join(runScreenshotDir, "evidence.json");
+const evidenceMarkdownPath = path.join(runScreenshotDir, "evidence.md");
+const screenshotEvidence: ScreenshotEvidence[] = [];
+const includeDockerEvidence = process.argv.includes("--docker");
+const baseEvidenceFeatures = [
+  "job-room-shell",
+  "active-job-card",
+  "job-search",
+  "job-sort",
+  "live-refresh-toggle",
+  "job-progress-and-artifact-tail",
+  "safe-stop-preview",
+  "safe-stop-result",
+  "recent-history",
+  "stale-job-filter"
+];
+const dockerEvidenceFeatures = [
+  "docker-job-filter",
+  "docker-artifact-container-detail",
+  "docker-stop-preview",
+  "docker-stop-result",
+  "docker-codex-exec-job-filter",
+  "docker-codex-exec-detail",
+  "docker-codex-exec-stop-preview",
+  "docker-codex-exec-stop-result"
+];
 
 async function main() {
   await assertServer();
@@ -51,10 +101,11 @@ async function main() {
     assert(processEvent.artifactPaths?.some((item) => item.path === artifactPath), "artifact path should be detected");
 
     await waitForArtifactText("fake-codex-smoke-step-2", 25000);
+    await waitForJob((item) => hasArtifact(item, artifactPath) && item.status === "active", 25000);
 
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
-      await browser.screenshot(path.join(runScreenshotDir, "01-monitor-page-loaded.png"));
+      await captureEvidence(browser, "01-monitor-page-loaded.png", "job-room-shell", "metrics, filters, search, sort, refresh, and live toggle are visible");
       await browser.waitForText("fake-codex-output.log", 30000);
       await browser.evaluate(`
         (() => {
@@ -62,43 +113,41 @@ async function main() {
             .find((node) => (node.textContent || '').includes('fake-codex-output.log'));
           if (!group) return 'missing group';
           group.scrollIntoView({ block: 'center' });
+          if (group instanceof HTMLElement) group.click();
           group.querySelectorAll('details').forEach((item) => { item.open = true; });
           group.style.outline = '3px solid #1967d2';
           return 'ok';
         })()
       `);
-      await browser.screenshot(path.join(runScreenshotDir, "02-agent-process-detected.png"));
+      await captureEvidence(browser, "02-active-job-card-appears.png", "active-job-card", "active job card shows title, status, process/artifact/container counts, and selected detail");
+      await verifySearchSortAndLiveControls(browser);
+      await browser.waitForText("fake-codex-smoke-step", 30000);
+      await captureEvidence(browser, "03-job-progress-live.png", "job-progress-and-artifact-tail", "progress and artifact tail update from the live job log");
 
-      await browser.evaluate(`
+      const previewed = await browser.evaluate(`
         (() => {
-          const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes('fake-codex-output.log'));
-          const button = group?.querySelector('.process-row button.danger');
-          if (button instanceof HTMLElement) {
-            button.scrollIntoView({ block: 'center' });
-            button.style.outline = '3px solid #b42318';
-          }
+          const buttons = [...document.querySelectorAll('button')];
+          const button = buttons.find((item) => (item.textContent || '').includes('Preview stop'));
+          button?.scrollIntoView({ block: 'center' });
+          button?.click();
           return Boolean(button);
         })()
       `);
-      await browser.screenshot(path.join(runScreenshotDir, "03-agent-stop-button-before-click.png"));
+      assert(previewed.result?.value === true, "stop preview button should be visible");
+      await browser.waitForText("Stop preview", 15000);
+      await captureEvidence(browser, "04-stop-preview-visible.png", "safe-stop-preview", "preview lists protected root, process targets, and container targets before execution");
 
       const clicked = await browser.evaluate(`
         (() => {
-          const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes('fake-codex-output.log'));
-          const groupButton = group?.querySelector('.agent-process-group-head button.danger');
-          if (groupButton) return 'unsafe-group-button';
-          const button = group?.querySelector('.process-row button.danger');
+          const buttons = [...document.querySelectorAll('button')];
+          const button = buttons.find((item) => (item.textContent || '').includes('Execute stop'));
           button?.click();
-          return button ? 'clicked-child' : 'missing-child-button';
+          return button ? 'clicked-stop' : 'missing-stop-button';
         })()
       `);
-      assert(clicked.result?.value === "clicked-child", `expected only child stop button, got ${clicked.result?.value}`);
-      await sleep(1500);
-      await browser.screenshot(path.join(runScreenshotDir, "04-agent-after-stop-click.png"));
-      await browser.waitForMissingText("fake-codex-output.log", 15000);
-      await browser.screenshot(path.join(runScreenshotDir, "05-agent-process-removed.png"));
+      assert(clicked.result?.value === "clicked-stop", `expected job stop button, got ${clicked.result?.value}`);
+      await browser.waitForText("Stop result", 15000);
+      await captureEvidence(browser, "05-stop-result-visible.png", "safe-stop-result", "stop result shows killed processes, removed containers, residual checks, and cleanup errors");
     } finally {
       await browser.close();
     }
@@ -106,16 +155,197 @@ async function main() {
     await waitForProcessExit(processEvent.agentRootPid ?? processEvent.pid, 15000);
     const afterKill = await listProcesses();
     assert(!afterKill.processes.some((item) => hasArtifact(item, artifactPath)), "agent process group should be stopped from the frontend");
+    const stoppedJob = await waitForJob((item) => hasArtifact(item, artifactPath) && ["stopped", "failed"].includes(item.status), 15000);
+    assert(Boolean(stoppedJob.lastStopResult), "stopped job should keep the stop result in recent history");
+    await captureRecentHistoryEvidence(artifactPath, "05b-recent-history-visible.png");
 
+    await runStaleJobCase();
     await maybeRunDockerCase();
     await maybeRunDockerCodexExecCase();
+    await writeEvidenceManifest();
 
     console.log("monitor smoke passed");
     console.log(`artifact: ${artifactPath}`);
     console.log(`screenshots: ${runScreenshotDir}`);
+    console.log(`evidence: ${evidencePath}`);
+    console.log(`evidence report: ${evidenceMarkdownPath}`);
   } finally {
     killProcessGroup(child.pid);
   }
+}
+
+async function runStaleJobCase() {
+  const staleArtifact = path.join(workDir, "stale-codex-output.log");
+  const fakeCodexPath = await writeFakeStaleCodex(staleArtifact);
+  const child = spawn(fakeCodexPath, [staleArtifact], {
+    cwd: root,
+    detached: process.platform !== "win32",
+    stdio: "ignore"
+  });
+  child.unref();
+  try {
+    await waitForArtifactTextAt(staleArtifact, "stale-codex-start", 20000);
+    await waitForJob((item) => hasArtifact(item, staleArtifact) && item.status === "active", 20000);
+    const staleJob = await waitForJob((item) => hasArtifact(item, staleArtifact) && item.status === "stale", 45000);
+    const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+    try {
+      await browser.evaluate(`
+        (() => {
+          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Stale'));
+          button?.click();
+          return Boolean(button);
+        })()
+      `);
+      await browser.waitForText("stale-codex-output.log", 15000);
+      await captureEvidence(browser, "06-stale-job-visible.png", "stale-job-filter", "stale filter exposes jobs with no artifact/log updates for more than 30 seconds");
+    } finally {
+      await browser.close();
+    }
+    await postJson(`/api/agent-jobs/${encodeURIComponent(staleJob.id)}/stop/preview`, {});
+    await postJson(`/api/agent-jobs/${encodeURIComponent(staleJob.id)}/stop`, { signal: "SIGTERM" });
+  } finally {
+    killProcessGroup(child.pid);
+  }
+}
+
+async function verifySearchSortAndLiveControls(browser: BrowserSession) {
+  const searched = await browser.evaluate(`
+    (() => {
+      const input = document.querySelector('input[aria-label="Search jobs"]');
+      if (!(input instanceof HTMLInputElement)) return 'missing-search';
+      input.focus();
+      input.value = 'fake-codex-output.log';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return document.body.innerText.includes('fake-codex-output.log') ? 'ok' : 'search-no-match';
+    })()
+  `);
+  assert(searched.result?.value === "ok", `search control should filter to the active job, got ${searched.result?.value}`);
+  await captureEvidence(browser, "02b-search-filter-visible.png", "job-search", "search filters jobs by title, artifact path, container, command, or cwd");
+
+  const sorted = await browser.evaluate(`
+    (() => {
+      const select = document.querySelector('select[aria-label="Sort jobs"]');
+      if (!(select instanceof HTMLSelectElement)) return 'missing-sort';
+      select.value = 'runtime';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return select.value;
+    })()
+  `);
+  assert(sorted.result?.value === "runtime", `sort control should switch to runtime, got ${sorted.result?.value}`);
+  await captureEvidence(browser, "02c-sort-control-visible.png", "job-sort", "sort control can switch the job list to longest runtime");
+
+  const paused = await browser.evaluate(`
+    (() => {
+      const checkbox = document.querySelector('.job-live-toggle input');
+      if (!(checkbox instanceof HTMLInputElement)) return 'missing-live-toggle';
+      if (checkbox.checked) checkbox.click();
+      return document.body.innerText.includes('Paused') ? 'ok' : 'pause-label-missing';
+    })()
+  `);
+  assert(paused.result?.value === "ok", `live toggle should switch to Paused, got ${paused.result?.value}`);
+  await captureEvidence(browser, "02d-live-paused-visible.png", "live-refresh-toggle", "auto refresh can be paused while inspecting a job");
+
+  const restored = await browser.evaluate(`
+    (() => {
+      const checkbox = document.querySelector('.job-live-toggle input');
+      const input = document.querySelector('input[aria-label="Search jobs"]');
+      if (checkbox instanceof HTMLInputElement && !checkbox.checked) checkbox.click();
+      if (input instanceof HTMLInputElement) {
+        input.value = '';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      return document.body.innerText.includes('Live') ? 'ok' : 'live-label-missing';
+    })()
+  `);
+  assert(restored.result?.value === "ok", `live toggle should switch back to Live, got ${restored.result?.value}`);
+}
+
+async function captureRecentHistoryEvidence(filePath: string, screenshotName: string) {
+  const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+  try {
+    const clicked = await browser.evaluate(`
+      (() => {
+        const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Recent'));
+        button?.click();
+        return Boolean(button);
+      })()
+    `);
+    assert(clicked.result?.value === true, "Recent filter should be visible");
+    await browser.waitForText(path.basename(filePath), 15000);
+    await captureEvidence(browser, screenshotName, "recent-history", "stopped jobs remain visible in Recent history with stop result context");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function captureEvidence(browser: BrowserSession, screenshotName: string, feature: string, assertion: string) {
+  const screenshotPath = path.join(runScreenshotDir, screenshotName);
+  await browser.screenshot(screenshotPath);
+  screenshotEvidence.push({
+    feature,
+    assertion,
+    screenshot: screenshotPath,
+    capturedAt: new Date().toISOString()
+  });
+}
+
+async function writeEvidenceManifest() {
+  await assertEvidenceContract();
+  const requiredFeatures = includeDockerEvidence ? [...baseEvidenceFeatures, ...dockerEvidenceFeatures] : baseEvidenceFeatures;
+  await writeFile(
+    evidencePath,
+    JSON.stringify(
+      {
+        runId,
+        baseUrl,
+        workDir,
+        artifactPath,
+        screenshotDir: runScreenshotDir,
+        requiredFeatures,
+        evidenceCount: screenshotEvidence.length,
+        evidence: screenshotEvidence
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await writeFile(evidenceMarkdownPath, renderEvidenceMarkdown(), "utf8");
+}
+
+async function assertEvidenceContract() {
+  const required = includeDockerEvidence ? [...baseEvidenceFeatures, ...dockerEvidenceFeatures] : baseEvidenceFeatures;
+  const captured = new Map(screenshotEvidence.map((item) => [item.feature, item]));
+  const missing = required.filter((feature) => !captured.has(feature));
+  assert(!missing.length, `missing screenshot evidence for features: ${missing.join(", ")}`);
+  for (const item of screenshotEvidence) {
+    const info = await stat(item.screenshot).catch(() => null);
+    assert(info && info.size > 0, `screenshot evidence is missing or empty: ${item.screenshot}`);
+  }
+}
+
+function renderEvidenceMarkdown(): string {
+  const lines = [
+    "# Agent Job Control Room Smoke Evidence",
+    "",
+    `- Run: \`${runId}\``,
+    `- Base URL: \`${baseUrl}\``,
+    `- Work dir: \`${workDir}\``,
+    `- Artifact: \`${artifactPath}\``,
+    `- Evidence count: ${screenshotEvidence.length}`,
+    "",
+    "| Feature | Assertion | Screenshot |",
+    "| --- | --- | --- |"
+  ];
+  for (const item of screenshotEvidence) {
+    lines.push(`| \`${item.feature}\` | ${escapeMarkdownTable(item.assertion)} | [${path.basename(item.screenshot)}](./${path.basename(item.screenshot)}) |`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function escapeMarkdownTable(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
 async function writeFakeCodex(): Promise<string> {
@@ -128,6 +358,27 @@ artifact="$1"
 mkdir -p "$(dirname "$artifact")"
 echo "fake-codex-root $$" >> "$artifact"
 setsid bash -lc 'artifact="$1"; for i in $(seq 1 24); do echo "fake-codex-smoke-step-$i" >> "$artifact"; sleep 2; done' bash "$artifact" &
+child=$!
+wait "$child"
+`,
+    "utf8"
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function writeFakeStaleCodex(staleArtifact: string): Promise<string> {
+  const staleBinDir = path.join(workDir, "stale-bin");
+  await mkdir(staleBinDir, { recursive: true });
+  const scriptPath = path.join(staleBinDir, "codex");
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+artifact="$1"
+mkdir -p "$(dirname "$artifact")"
+echo "stale-codex-start $$" >> "$artifact"
+setsid bash -lc 'sleep 90' &
 child=$!
 wait "$child"
 `,
@@ -173,9 +424,10 @@ wait "$child"
     const dockerProcess = await waitForProcess((item) => Boolean(item.canStop) && hasArtifact(item, dockerArtifact) && JSON.stringify(item).includes(name), 45000);
     assert(dockerProcess.dockerContainers?.includes(name), "docker container name should be associated with the monitored child process");
     await waitForArtifactTextAt(dockerArtifact, "docker-detached-container", 45000);
+    await waitForJob((item) => hasArtifact(item, dockerArtifact) && JSON.stringify(item).includes(name), 45000);
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
-      await browser.screenshot(path.join(runScreenshotDir, "06-docker-monitor-page-loaded.png"));
+      await captureEvidence(browser, "07-docker-monitor-page-loaded.png", "docker-job-filter", "docker job appears in the monitor with attached container summary");
       await browser.waitForText("fake-codex-docker.log", 30000);
       await browser.evaluate(`
         (() => {
@@ -183,39 +435,35 @@ wait "$child"
             .find((node) => (node.textContent || '').includes('fake-codex-docker.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
           if (!group) return false;
           group.scrollIntoView({ block: 'center' });
+          if (group instanceof HTMLElement) group.click();
           group.querySelectorAll('details').forEach((item) => { item.open = true; });
           group.style.outline = '3px solid #b42318';
           return true;
         })()
       `);
-      await browser.screenshot(path.join(runScreenshotDir, "07-docker-process-and-artifact-detected.png"));
-      await browser.evaluate(`
+      await captureEvidence(browser, "08-docker-process-and-artifact-detected.png", "docker-artifact-container-detail", "docker job detail shows artifact tail and detached container name");
+      const previewed = await browser.evaluate(`
         (() => {
-          const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes('fake-codex-docker.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
-          const button = group?.querySelector('.process-row button.danger');
-          if (button instanceof HTMLElement) {
-            button.scrollIntoView({ block: 'center' });
-            button.style.outline = '3px solid #b42318';
-          }
+          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Preview stop'));
+          button?.scrollIntoView({ block: 'center' });
+          button?.click();
           return Boolean(button);
         })()
       `);
-      await browser.screenshot(path.join(runScreenshotDir, "08-docker-stop-button-before-click.png"));
+      assert(previewed.result?.value === true, "docker stop preview should be visible");
+      await browser.waitForText("Stop preview", 15000);
+      await browser.waitForText(name, 15000);
+      await captureEvidence(browser, "09-docker-stop-preview-visible.png", "docker-stop-preview", "docker stop preview lists the detached container to remove");
       const clicked = await browser.evaluate(`
         (() => {
-          const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes('fake-codex-docker.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
-          const groupButton = group?.querySelector('.agent-process-group-head button.danger');
-          if (groupButton) return 'unsafe-group-button';
-          const button = group?.querySelector('.process-row button.danger');
+          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Execute stop'));
           button?.click();
-          return button ? 'clicked-child' : 'missing-child-button';
+          return button ? 'clicked-stop' : 'missing-stop-button';
         })()
       `);
-      assert(clicked.result?.value === "clicked-child", `frontend should expose only a child stop button for docker agent group, got ${clicked.result?.value}`);
-      await sleep(3500);
-      await browser.screenshot(path.join(runScreenshotDir, "09-docker-after-stop-click.png"));
+      assert(clicked.result?.value === "clicked-stop", `frontend should expose a job stop action for docker job, got ${clicked.result?.value}`);
+      await browser.waitForText("Stop result", 15000);
+      await captureEvidence(browser, "10-docker-stop-result-visible.png", "docker-stop-result", "docker stop result shows container removal and residual container check");
     } finally {
       await browser.close();
     }
@@ -224,13 +472,7 @@ wait "$child"
       await commandOutput("docker", ["rm", "-f", name]);
       throw new Error("docker container survived frontend stop; monitor needs docker-aware cleanup for detached containers");
     }
-    const verificationBrowser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
-    try {
-      await verificationBrowser.waitForMissingText("fake-codex-docker.log", 15000);
-      await verificationBrowser.screenshot(path.join(runScreenshotDir, "10-docker-process-removed-container-stopped.png"));
-    } finally {
-      await verificationBrowser.close();
-    }
+    await waitForJob((item) => hasArtifact(item, dockerArtifact) && ["stopped", "failed"].includes(item.status), 15000);
     console.log("docker smoke passed");
   } finally {
     killProcessGroup(child.pid);
@@ -267,9 +509,10 @@ wait "$child"
     assert(dockerProcess.dockerContainers?.includes(name), "docker codex-exec container name should be associated with the monitored child process");
     await waitForArtifactTextAt(dockerArtifact, "docker-codex-exec-container", 45000);
     await waitForDockerLogText(name, "inside-docker-codex-exec-start", 45000);
+    await waitForJob((item) => hasArtifact(item, dockerArtifact) && JSON.stringify(item).includes(name), 45000);
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
-      await browser.screenshot(path.join(runScreenshotDir, "11-docker-codex-exec-page-loaded.png"));
+      await captureEvidence(browser, "11-docker-codex-exec-page-loaded.png", "docker-codex-exec-job-filter", "docker codex-exec job appears in the monitor");
       await browser.waitForText("fake-docker-codex-exec.log", 30000);
       await browser.evaluate(`
         (() => {
@@ -277,39 +520,35 @@ wait "$child"
             .find((node) => (node.textContent || '').includes('fake-docker-codex-exec.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
           if (!group) return false;
           group.scrollIntoView({ block: 'center' });
+          if (group instanceof HTMLElement) group.click();
           group.querySelectorAll('details').forEach((item) => { item.open = true; });
           group.style.outline = '3px solid #805ad5';
           return true;
         })()
       `);
-      await browser.screenshot(path.join(runScreenshotDir, "12-docker-codex-exec-detected.png"));
-      await browser.evaluate(`
+      await captureEvidence(browser, "12-docker-codex-exec-detected.png", "docker-codex-exec-detail", "docker codex-exec detail shows host process, artifact tail, and container");
+      const previewed = await browser.evaluate(`
         (() => {
-          const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes('fake-docker-codex-exec.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
-          const button = group?.querySelector('.process-row button.danger');
-          if (button instanceof HTMLElement) {
-            button.scrollIntoView({ block: 'center' });
-            button.style.outline = '3px solid #b42318';
-          }
+          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Preview stop'));
+          button?.scrollIntoView({ block: 'center' });
+          button?.click();
           return Boolean(button);
         })()
       `);
-      await browser.screenshot(path.join(runScreenshotDir, "13-docker-codex-exec-stop-before-click.png"));
+      assert(previewed.result?.value === true, "docker codex-exec stop preview should be visible");
+      await browser.waitForText("Stop preview", 15000);
+      await browser.waitForText(name, 15000);
+      await captureEvidence(browser, "13-docker-codex-exec-stop-preview.png", "docker-codex-exec-stop-preview", "docker codex-exec stop preview lists process and container cleanup targets");
       const clicked = await browser.evaluate(`
         (() => {
-          const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes('fake-docker-codex-exec.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
-          const groupButton = group?.querySelector('.agent-process-group-head button.danger');
-          if (groupButton) return 'unsafe-group-button';
-          const button = group?.querySelector('.process-row button.danger');
+          const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').includes('Execute stop'));
           button?.click();
-          return button ? 'clicked-child' : 'missing-child-button';
+          return button ? 'clicked-stop' : 'missing-stop-button';
         })()
       `);
-      assert(clicked.result?.value === "clicked-child", `frontend should expose only a child stop button for docker codex-exec group, got ${clicked.result?.value}`);
-      await sleep(3500);
-      await browser.screenshot(path.join(runScreenshotDir, "14-docker-codex-exec-after-stop-click.png"));
+      assert(clicked.result?.value === "clicked-stop", `frontend should expose a job stop action for docker codex-exec job, got ${clicked.result?.value}`);
+      await browser.waitForText("Stop result", 15000);
+      await captureEvidence(browser, "14-docker-codex-exec-stop-result.png", "docker-codex-exec-stop-result", "docker codex-exec stop result shows cleanup and residual checks");
     } finally {
       await browser.close();
     }
@@ -318,13 +557,7 @@ wait "$child"
       await commandOutput("docker", ["rm", "-f", name]);
       throw new Error("docker codex-exec container survived frontend stop");
     }
-    const verificationBrowser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
-    try {
-      await verificationBrowser.waitForMissingText("fake-docker-codex-exec.log", 15000);
-      await verificationBrowser.screenshot(path.join(runScreenshotDir, "15-docker-codex-exec-removed-container-stopped.png"));
-    } finally {
-      await verificationBrowser.close();
-    }
+    await waitForJob((item) => hasArtifact(item, dockerArtifact) && ["stopped", "failed"].includes(item.status), 15000);
     console.log("docker codex exec smoke passed");
   } finally {
     killProcessGroup(child.pid);
@@ -333,7 +566,7 @@ wait "$child"
 }
 
 async function assertServer() {
-  const response = await fetch(`${baseUrl}/api/agent-processes`).catch(() => null);
+  const response = await fetch(`${baseUrl}/api/agent-jobs`).catch(() => null);
   assert(response?.ok, `SkillScope dev server is not reachable at ${baseUrl}`);
 }
 
@@ -345,13 +578,23 @@ async function listProcesses(): Promise<MonitorPayload> {
   return (await response.json()) as MonitorPayload;
 }
 
+async function listJobs(): Promise<JobPayload> {
+  const response = await fetch(`${baseUrl}/api/agent-jobs`);
+  if (!response.ok) {
+    throw new Error(`failed to list jobs: HTTP ${response.status} ${await response.text()}`);
+  }
+  return (await response.json()) as JobPayload;
+}
+
 async function postJson(pathname: string, body: unknown) {
   const response = await fetch(`${baseUrl}${pathname}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
-  assert(response.ok, `POST ${pathname} failed: HTTP ${response.status} ${await response.text()}`);
+  if (!response.ok) {
+    throw new Error(`POST ${pathname} failed: HTTP ${response.status} ${await response.text()}`);
+  }
   return response.json();
 }
 
@@ -366,6 +609,19 @@ async function waitForProcess(predicate: (item: AgentProcessEvent) => boolean, t
     await sleep(700);
   }
   throw new Error("timed out waiting for monitor process");
+}
+
+async function waitForJob(predicate: (item: AgentJob) => boolean, timeoutMs: number): Promise<AgentJob> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const payload = await listJobs();
+    const found = payload.jobs.find(predicate);
+    if (found) {
+      return found;
+    }
+    await sleep(700);
+  }
+  throw new Error("timed out waiting for monitor job");
 }
 
 async function waitForArtifactText(expected: string, timeoutMs: number) {
@@ -411,7 +667,7 @@ async function waitForProcessExit(pid: number | undefined, timeoutMs: number) {
   throw new Error(`process group still visible after stop: ${pid}`);
 }
 
-function hasArtifact(item: AgentProcessEvent, filePath: string): boolean {
+function hasArtifact(item: unknown, filePath: string): boolean {
   return JSON.stringify(item).includes(filePath);
 }
 

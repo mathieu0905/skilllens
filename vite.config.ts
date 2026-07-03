@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readlinkSync, statSync } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   applyAgentJudgeResponse,
@@ -212,6 +212,78 @@ interface AgentProcessEvent {
   error?: string;
 }
 
+interface AgentJobArtifact {
+  label: string;
+  path: string;
+  size?: number;
+  mtime?: string;
+}
+
+interface AgentJobContainer {
+  name: string;
+  source?: "docker-name" | "compose-project";
+  project?: string;
+}
+
+interface AgentJobProgress {
+  label: string;
+  detail: string;
+  percent?: number;
+  updatedAt?: string;
+  latestLine?: string;
+}
+
+interface AgentStopPlan {
+  jobId: string;
+  processTargets: Array<{
+    pid?: number;
+    pgid?: number;
+    command: string;
+    reason: string;
+  }>;
+  containers: AgentJobContainer[];
+  protectedRoot?: {
+    pid?: number;
+    label?: string;
+    reason: string;
+  };
+  warnings: string[];
+}
+
+interface AgentStopResult {
+  jobId: string;
+  requestedAt: string;
+  signal: NodeJS.Signals;
+  killedProcesses: Array<{ pid?: number; pgid?: number; ok: boolean; error?: string }>;
+  removedContainers: Array<{ name: string; ok: boolean; error?: string }>;
+  residualProcesses: Array<{ pid?: number; pgid?: number; command?: string }>;
+  residualContainers: string[];
+  cleanupErrors: string[];
+}
+
+interface AgentJob {
+  id: string;
+  title: string;
+  status: "active" | "recent" | "stale" | "stopped" | "failed";
+  agentRoot?: {
+    pid?: number;
+    command?: "codex" | "claude" | "unknown";
+    label?: string;
+    protected: boolean;
+  };
+  startedAt: string;
+  lastUpdatedAt: string;
+  staleSeconds: number;
+  processes: AgentProcessEvent[];
+  containers: AgentJobContainer[];
+  artifacts: AgentJobArtifact[];
+  progress: AgentJobProgress;
+  canStop: boolean;
+  stopPlan?: AgentStopPlan;
+  lastStopResult?: AgentStopResult;
+  historyPath?: string;
+}
+
 interface ActiveAgentProcess {
   event: AgentProcessEvent;
   child: ReturnType<typeof spawn>;
@@ -252,6 +324,35 @@ function skillLensCaptureApi() {
             await sendJson(res, await readTraceTail(tracePath, offset, maxBytes));
           } catch (error) {
             sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to read trace" });
+          }
+          return;
+        }
+        if (url === "/api/agent-jobs" && req.method === "GET") {
+          try {
+            await sendJson(res, await listAgentJobs());
+          } catch (error) {
+            sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to list jobs" });
+          }
+          return;
+        }
+        const stopPreviewMatch = url.match(/^\/api\/agent-jobs\/([^/?#]+)\/stop\/preview$/);
+        if (stopPreviewMatch && req.method === "POST") {
+          try {
+            const plan = await previewAgentJobStop(decodeURIComponent(stopPreviewMatch[1]));
+            await sendJson(res, plan);
+          } catch (error) {
+            sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to preview stop" });
+          }
+          return;
+        }
+        const stopMatch = url.match(/^\/api\/agent-jobs\/([^/?#]+)\/stop$/);
+        if (stopMatch && req.method === "POST") {
+          try {
+            const body = JSON.parse(await readBody(req) || "{}") as { signal?: NodeJS.Signals };
+            const result = await stopAgentJob(decodeURIComponent(stopMatch[1]), body.signal ?? "SIGTERM");
+            await sendJson(res, result);
+          } catch (error) {
+            sendStatus(res, 500, { error: error instanceof Error ? error.message : "failed to stop job" });
           }
           return;
         }
@@ -2906,6 +3007,418 @@ async function findRecentAgentTrace(command: string, cwd: string, startedAfterMs
   return files[0]?.path;
 }
 
+async function listAgentJobs(): Promise<{ jobs: AgentJob[]; active: AgentJob[]; recent: AgentJob[]; updatedAt: string }> {
+  const processPayload = await listAgentProcesses();
+  const activeJobs = await buildActiveAgentJobs(processPayload.processes);
+  const historyJobs = await readRecentAgentJobHistory();
+  const activeIds = new Set(activeJobs.map((job) => job.id));
+  const recent = historyJobs.filter((job) => !activeIds.has(job.id)).slice(0, 100);
+  return {
+    jobs: [...activeJobs, ...recent],
+    active: activeJobs,
+    recent,
+    updatedAt: processPayload.updatedAt
+  };
+}
+
+async function buildActiveAgentJobs(processes: AgentProcessEvent[]): Promise<AgentJob[]> {
+  const groups = new Map<string, AgentProcessEvent[]>();
+  for (const processEvent of processes) {
+    if (!processEvent.agentRootPid || processEvent.agentRootCommand === "unknown") {
+      continue;
+    }
+    const key = `agent-${processEvent.agentRootPid}`;
+    groups.set(key, [...(groups.get(key) ?? []), processEvent]);
+  }
+  const jobs = await Promise.all(
+    Array.from(groups.entries()).map(async ([id, groupProcesses]) => {
+      const sortedProcesses = [...groupProcesses].sort((left, right) => (left.pid ?? 0) - (right.pid ?? 0));
+      const root =
+        sortedProcesses.find((processEvent) => processEvent.pid && processEvent.pid === processEvent.agentRootPid) ??
+        sortedProcesses.find((processEvent) => /codex|claude/i.test(processEvent.command)) ??
+        sortedProcesses[0];
+      const artifacts = uniqueArtifacts(
+        sortedProcesses.flatMap((processEvent) => [
+          ...(processEvent.tracePath
+            ? [{ label: "trace", path: processEvent.tracePath, size: processEvent.traceSize, mtime: processEvent.traceMtime }]
+            : []),
+          ...(processEvent.artifactPaths ?? [])
+        ])
+      ).map((artifact) => ({ ...artifact, ...artifactStatFields(artifact.path) }));
+      const containers = await containersForJobProcesses(sortedProcesses);
+      const lastUpdatedAt = latestJobUpdateAt(sortedProcesses, artifacts);
+      const staleSeconds = Math.max(0, Math.floor((Date.now() - Date.parse(lastUpdatedAt)) / 1000));
+      const hasFailure = sortedProcesses.some((processEvent) => processEvent.status === "failed");
+      const running = sortedProcesses.some((processEvent) => processEvent.status === "running" || processEvent.status === "started");
+      const job: AgentJob = {
+        id,
+        title: inferAgentJobTitle(sortedProcesses, artifacts, containers),
+        status: hasFailure ? "failed" : running && staleSeconds > 30 ? "stale" : running ? "active" : "recent",
+        agentRoot: {
+          pid: root?.agentRootPid,
+          command: root?.agentRootCommand,
+          label: root?.agentRootLabel,
+          protected: true
+        },
+        startedAt: sortedProcesses
+          .map((processEvent) => processEvent.startedAt)
+          .sort((left, right) => left.localeCompare(right))[0] ?? new Date().toISOString(),
+        lastUpdatedAt,
+        staleSeconds,
+        processes: sortedProcesses,
+        containers,
+        artifacts,
+        progress: await inferJobProgress(artifacts),
+        canStop: sortedProcesses.some((processEvent) => processEvent.canStop && processEvent.pid !== processEvent.agentRootPid),
+        stopPlan: undefined,
+        lastStopResult: undefined
+      };
+      return job;
+    })
+  );
+  return jobs.sort((left, right) => right.lastUpdatedAt.localeCompare(left.lastUpdatedAt));
+}
+
+async function previewAgentJobStop(jobId: string): Promise<AgentStopPlan> {
+  const activeJobs = await buildActiveAgentJobs((await listAgentProcesses()).processes);
+  const job = activeJobs.find((candidate) => candidate.id === jobId);
+  if (!job) {
+    throw new Error("job is not active");
+  }
+  return createAgentJobStopPlan(job);
+}
+
+async function stopAgentJob(jobId: string, signal: NodeJS.Signals): Promise<{ job: AgentJob; stopPlan: AgentStopPlan; stopResult: AgentStopResult }> {
+  const activeJobs = await buildActiveAgentJobs((await listAgentProcesses()).processes);
+  const job = activeJobs.find((candidate) => candidate.id === jobId);
+  if (!job) {
+    throw new Error("job is not active");
+  }
+  const stopPlan = await createAgentJobStopPlan(job);
+  const stopResult: AgentStopResult = {
+    jobId,
+    requestedAt: new Date().toISOString(),
+    signal,
+    killedProcesses: [],
+    removedContainers: [],
+    residualProcesses: [],
+    residualContainers: [],
+    cleanupErrors: []
+  };
+  for (const target of stopPlan.processTargets) {
+    const killTarget = process.platform !== "win32" && target.pgid ? -target.pgid : target.pid;
+    if (!killTarget) {
+      continue;
+    }
+    try {
+      process.kill(killTarget, signal);
+      stopResult.killedProcesses.push({ pid: target.pid, pgid: target.pgid, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "kill failed";
+      stopResult.killedProcesses.push({ pid: target.pid, pgid: target.pgid, ok: false, error: message });
+      stopResult.cleanupErrors.push(`process ${target.pid ?? target.pgid}: ${message}`);
+    }
+  }
+  for (const container of stopPlan.containers) {
+    try {
+      await execFileText("docker", ["rm", "-f", container.name]);
+      stopResult.removedContainers.push({ name: container.name, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "docker rm failed";
+      stopResult.removedContainers.push({ name: container.name, ok: false, error: message });
+      stopResult.cleanupErrors.push(`container ${container.name}: ${message}`);
+    }
+  }
+  await verifyAgentStopCleanup(stopPlan, stopResult);
+  for (const processEvent of job.processes) {
+    if (processEvent.id && activeAgentProcesses.has(processEvent.id)) {
+      const active = activeAgentProcesses.get(processEvent.id)!;
+      active.event = {
+        ...active.event,
+        status: processEvent.pid === job.agentRoot?.pid ? active.event.status : "killed",
+        endedAt: processEvent.pid === job.agentRoot?.pid ? active.event.endedAt : new Date().toISOString(),
+        signal: processEvent.pid === job.agentRoot?.pid ? active.event.signal : signal
+      };
+      activeAgentProcesses.set(processEvent.id, active);
+    }
+  }
+  const stoppedJob: AgentJob = {
+    ...job,
+    status: stopResult.cleanupErrors.length ? "failed" : "stopped",
+    lastUpdatedAt: stopResult.requestedAt,
+    staleSeconds: 0,
+    processes: job.processes.map((processEvent) =>
+      processEvent.pid === job.agentRoot?.pid ? processEvent : { ...processEvent, status: "killed", endedAt: stopResult.requestedAt, signal }
+    ),
+    canStop: false,
+    stopPlan,
+    lastStopResult: stopResult
+  };
+  await writeAgentJobHistory(stoppedJob);
+  return { job: stoppedJob, stopPlan, stopResult };
+}
+
+async function createAgentJobStopPlan(job: AgentJob): Promise<AgentStopPlan> {
+  const rootPid = job.agentRoot?.pid;
+  const targets = new Map<string, AgentStopPlan["processTargets"][number]>();
+  for (const processEvent of job.processes) {
+    if (!processEvent.canStop || !processEvent.pid || processEvent.pid === rootPid) {
+      continue;
+    }
+    const pgid = processEvent.pgid && processEvent.pgid !== rootPid ? processEvent.pgid : undefined;
+    const key = pgid ? `pgid-${pgid}` : `pid-${processEvent.pid}`;
+    targets.set(key, {
+      pid: processEvent.pid,
+      pgid,
+      command: processEvent.command,
+      reason: pgid ? "agent-owned child process group" : "agent-owned child process"
+    });
+  }
+  const enrichedContainers = await containersForJobProcesses(job.processes);
+  const containers = mergeJobContainers([...job.containers, ...enrichedContainers]);
+  return {
+    jobId: job.id,
+    processTargets: Array.from(targets.values()),
+    containers,
+    protectedRoot: rootPid
+      ? {
+          pid: rootPid,
+          label: job.agentRoot?.label,
+          reason: "external Codex/Claude root process group is protected"
+        }
+      : undefined,
+    warnings: targets.size || containers.length ? [] : ["No stoppable child process or Docker container was found."]
+  };
+}
+
+async function verifyAgentStopCleanup(stopPlan: AgentStopPlan, stopResult: AgentStopResult) {
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  if (process.platform !== "win32" && stopPlan.processTargets.length) {
+    const snapshots = await listProcessSnapshots().catch(() => []);
+    for (const target of stopPlan.processTargets) {
+      const remaining = snapshots.find((snapshot) =>
+        target.pgid ? snapshot.pgid === target.pgid && snapshot.pid !== stopPlan.protectedRoot?.pid : snapshot.pid === target.pid
+      );
+      if (remaining) {
+        stopResult.residualProcesses.push({ pid: remaining.pid, pgid: remaining.pgid, command: remaining.command });
+        stopResult.cleanupErrors.push(`residual process ${remaining.pid} (${remaining.command}) is still running`);
+      }
+    }
+  }
+  for (const container of stopPlan.containers) {
+    const exists = await dockerContainerExists(container.name);
+    if (exists) {
+      stopResult.residualContainers.push(container.name);
+      stopResult.cleanupErrors.push(`residual container ${container.name} is still present`);
+    }
+  }
+}
+
+async function listProcessSnapshots(): Promise<ProcessSnapshot[]> {
+  const rows = await execFileText("ps", ["-eo", "pid=,ppid=,pgid=,stat=,etime=,args="]);
+  return rows
+    .split(/\r?\n/)
+    .map(parseProcessSnapshot)
+    .filter((snapshot): snapshot is ProcessSnapshot => Boolean(snapshot));
+}
+
+async function dockerContainerExists(name: string): Promise<boolean> {
+  const output = await execFileText("docker", ["ps", "-a", "-q", "--filter", `name=^/${name}$`]).catch(() => "");
+  return Boolean(output.trim());
+}
+
+async function containersForJobProcesses(processes: AgentProcessEvent[]): Promise<AgentJobContainer[]> {
+  const containers = await Promise.all(
+    processes.map(async (processEvent) => {
+      const names = uniqueStrings([
+        ...(processEvent.dockerContainers ?? []),
+        ...(await findDockerContainersForProcess(processEvent.pid, processEvent.pgid))
+      ]);
+      return names.map((name) => ({ name, source: "docker-name" as const }));
+    })
+  );
+  return mergeJobContainers(containers.flat());
+}
+
+function mergeJobContainers(containers: AgentJobContainer[]): AgentJobContainer[] {
+  const seen = new Map<string, AgentJobContainer>();
+  for (const container of containers) {
+    if (!container.name) {
+      continue;
+    }
+    seen.set(container.name, { ...seen.get(container.name), ...container });
+  }
+  return Array.from(seen.values()).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function inferJobProgress(artifacts: AgentJobArtifact[]): Promise<AgentJobProgress> {
+  const newest = artifacts
+    .filter((artifact) => artifact.path && artifact.mtime)
+    .sort((left, right) => (right.mtime ?? "").localeCompare(left.mtime ?? ""))[0];
+  if (!newest) {
+    return { label: "Live", detail: "waiting for artifacts" };
+  }
+  try {
+    const tail = await readTraceTail(newest.path, Math.max(0, (newest.size ?? 0) - 16000), 16000);
+    const lines = tail.content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const latestLine = lines[lines.length - 1] ?? "";
+    const stepMatches = Array.from(tail.content.matchAll(/\bstep[-_ ]?(\d+)(?:\s*\/\s*(\d+))?\b/gi));
+    const latestStep = stepMatches[stepMatches.length - 1];
+    if (latestStep) {
+      const current = Number(latestStep[1]);
+      const total = latestStep[2] ? Number(latestStep[2]) : undefined;
+      return {
+        label: `step ${current}${total ? `/${total}` : ""}`,
+        detail: latestLine || "artifact updating",
+        percent: total ? Math.min(100, Math.max(0, (current / total) * 100)) : undefined,
+        updatedAt: newest.mtime,
+        latestLine
+      };
+    }
+    return {
+      label: `${lines.length} updates`,
+      detail: latestLine || "artifact updating",
+      updatedAt: newest.mtime,
+      latestLine
+    };
+  } catch {
+    return { label: "Live", detail: "artifact tail unavailable", updatedAt: newest.mtime };
+  }
+}
+
+function inferAgentJobTitle(processes: AgentProcessEvent[], artifacts: AgentJobArtifact[], containers: AgentJobContainer[]): string {
+  const artifact = artifacts.find((item) => item.path && !/sessions[\/].+\.jsonl$/i.test(item.path)) ?? artifacts[0];
+  if (artifact?.path) {
+    return path.basename(artifact.path);
+  }
+  if (containers.length) {
+    return containers.map((container) => container.name).join(", ");
+  }
+  const command = processes.find((processEvent) => processEvent.canStop)?.command ?? processes[0]?.command ?? "agent job";
+  const args = processes.find((processEvent) => processEvent.canStop)?.args ?? processes[0]?.args ?? [];
+  return truncateText(`${command} ${args.join(" ")}`.trim(), 96);
+}
+
+function latestJobUpdateAt(processes: AgentProcessEvent[], artifacts: AgentJobArtifact[]): string {
+  const candidates = [
+    ...processes.map((processEvent) => processEvent.endedAt || processEvent.traceMtime || processEvent.startedAt),
+    ...artifacts.map((artifact) => artifact.mtime)
+  ].filter((value): value is string => Boolean(value));
+  return candidates.sort((left, right) => right.localeCompare(left))[0] ?? new Date().toISOString();
+}
+
+async function readRecentAgentJobHistory(): Promise<AgentJob[]> {
+  const root = monitorRunsRoot();
+  if (!existsSync(root)) {
+    return [];
+  }
+  const dayDirs = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const files: Array<{ path: string; mtimeMs: number }> = [];
+  for (const dir of dayDirs) {
+    if (!dir.isDirectory()) {
+      continue;
+    }
+    const dirPath = path.join(root, dir.name);
+    const entries = await readdir(dirPath, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const filePath = path.join(dirPath, entry.name);
+      const info = await stat(filePath).catch(() => null);
+      if (info) {
+        files.push({ path: filePath, mtimeMs: info.mtimeMs });
+      }
+    }
+  }
+  const jobs: AgentJob[] = [];
+  for (const file of files.sort((left, right) => right.mtimeMs - left.mtimeMs).slice(0, 100)) {
+    try {
+      const parsed = JSON.parse(await readFile(file.path, "utf8")) as { job?: AgentJob };
+      if (parsed.job) {
+        jobs.push({ ...parsed.job, historyPath: file.path });
+      }
+    } catch {
+      // Ignore corrupt local history entries.
+    }
+  }
+  return jobs;
+}
+
+async function writeAgentJobHistory(job: AgentJob) {
+  const date = new Date().toISOString().slice(0, 10);
+  const dir = path.join(monitorRunsRoot(), date);
+  await mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `${safeFileName(job.id)}.json`);
+  await writeFile(
+    filePath,
+    JSON.stringify(
+      {
+        schemaVersion: "skilllens.monitor-job.v1",
+        codeCommit: await currentGitCommit(),
+        analyzerVersion: ANALYZER_VERSION,
+        sourceSkillPath: process.cwd(),
+        tracePaths: job.artifacts.filter((artifact) => artifact.label === "trace").map((artifact) => artifact.path),
+        nativeVerifierResult: job.lastStopResult?.cleanupErrors.length ? "cleanup-errors" : "stopped",
+        recordedAt: new Date().toISOString(),
+        job
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await pruneAgentJobHistory(100);
+}
+
+async function pruneAgentJobHistory(keep: number) {
+  const root = monitorRunsRoot();
+  if (!existsSync(root)) {
+    return;
+  }
+  const files: Array<{ path: string; mtimeMs: number }> = [];
+  const dayDirs = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const dir of dayDirs) {
+    if (!dir.isDirectory()) {
+      continue;
+    }
+    const dirPath = path.join(root, dir.name);
+    const entries = await readdir(dirPath, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const filePath = path.join(dirPath, entry.name);
+      const info = await stat(filePath).catch(() => null);
+      if (info) {
+        files.push({ path: filePath, mtimeMs: info.mtimeMs });
+      }
+    }
+  }
+  await Promise.all(
+    files
+      .sort((left, right) => right.mtimeMs - left.mtimeMs)
+      .slice(keep)
+      .map((file) => rm(file.path, { force: true }).catch(() => undefined))
+  );
+}
+
+function monitorRunsRoot() {
+  return path.join(process.cwd(), ".skilllens", "monitor-runs");
+}
+
+async function currentGitCommit(): Promise<string> {
+  return (await execFileText("git", ["rev-parse", "HEAD"]).catch(() => "unknown")).trim() || "unknown";
+}
+
+function safeFileName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 140) || "job";
+}
+
+function truncateText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, Math.max(0, max - 1))}...` : value;
+}
+
 async function killAgentProcess(id: string | undefined, pid: number | undefined, pgid: number | undefined, signal: NodeJS.Signals) {
   const active = id ? activeAgentProcesses.get(id) : Array.from(activeAgentProcesses.values()).find((item) => item.event.pid === pid);
   if (!active && !pid) {
@@ -3274,19 +3787,49 @@ function detectDockerContainers(argsText: string): string[] {
   return uniqueStrings(names.filter((name) => !name.startsWith("-")));
 }
 
+function detectDockerComposeProjects(argsText: string): string[] {
+  const projects = [
+    ...Array.from(argsText.matchAll(/\bdocker\s+compose\b[^;&|]*?(?:-p|--project-name)(?:=|\s+)([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\b/g)).map(
+      (match) => match[1]
+    ),
+    ...Array.from(argsText.matchAll(/\bCOMPOSE_PROJECT_NAME=([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\b/g)).map((match) => match[1])
+  ];
+  return uniqueStrings(projects.filter((name) => !name.startsWith("-")));
+}
+
 async function findDockerContainersForProcess(pid: number | undefined, pgid: number | undefined): Promise<string[]> {
   if (process.platform === "win32" || (!pid && !pgid)) {
     return [];
   }
   try {
     const rows = await execFileText("ps", ["-eo", "pid=,ppid=,pgid=,args="]);
-    const names = rows
+    const matchingArgs = rows
       .split(/\r?\n/)
       .map((row) => row.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/))
       .filter((match): match is RegExpMatchArray => Boolean(match))
       .filter((match) => Number(match[1]) === pid || Number(match[3]) === pgid)
-      .flatMap((match) => detectDockerContainers(match[4]));
-    return uniqueStrings(names);
+      .map((match) => match[4]);
+    const names = matchingArgs.flatMap((argsText) => detectDockerContainers(argsText));
+    const composeNames = (
+      await Promise.all(matchingArgs.flatMap((argsText) => detectDockerComposeProjects(argsText)).map((project) => listDockerComposeContainers(project)))
+    ).flat();
+    return uniqueStrings([...names, ...composeNames]);
+  } catch {
+    return [];
+  }
+}
+
+async function listDockerComposeContainers(project: string): Promise<string[]> {
+  try {
+    const output = await execFileText("docker", [
+      "ps",
+      "-a",
+      "--filter",
+      `label=com.docker.compose.project=${project}`,
+      "--format",
+      "{{.Names}}"
+    ]);
+    return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   } catch {
     return [];
   }

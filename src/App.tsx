@@ -222,6 +222,69 @@ interface AgentProcessEvent {
   error?: string;
 }
 
+interface AgentJobArtifact {
+  label: string;
+  path: string;
+  size?: number;
+  mtime?: string;
+}
+
+interface AgentJobContainer {
+  name: string;
+  source?: "docker-name" | "compose-project";
+  project?: string;
+}
+
+interface AgentJobProgress {
+  label: string;
+  detail: string;
+  percent?: number;
+  updatedAt?: string;
+  latestLine?: string;
+}
+
+interface AgentStopPlan {
+  jobId: string;
+  processTargets: Array<{ pid?: number; pgid?: number; command: string; reason: string }>;
+  containers: AgentJobContainer[];
+  protectedRoot?: { pid?: number; label?: string; reason: string };
+  warnings: string[];
+}
+
+interface AgentStopResult {
+  jobId: string;
+  requestedAt: string;
+  signal: string;
+  killedProcesses: Array<{ pid?: number; pgid?: number; ok: boolean; error?: string }>;
+  removedContainers: Array<{ name: string; ok: boolean; error?: string }>;
+  residualProcesses?: Array<{ pid?: number; pgid?: number; command?: string }>;
+  residualContainers?: string[];
+  cleanupErrors: string[];
+}
+
+interface AgentJob {
+  id: string;
+  title: string;
+  status: "active" | "recent" | "stale" | "stopped" | "failed";
+  agentRoot?: {
+    pid?: number;
+    command?: "codex" | "claude" | "unknown";
+    label?: string;
+    protected: boolean;
+  };
+  startedAt: string;
+  lastUpdatedAt: string;
+  staleSeconds: number;
+  processes: AgentProcessEvent[];
+  containers: AgentJobContainer[];
+  artifacts: AgentJobArtifact[];
+  progress: AgentJobProgress;
+  canStop: boolean;
+  stopPlan?: AgentStopPlan;
+  lastStopResult?: AgentStopResult;
+  historyPath?: string;
+}
+
 interface TraceTailState {
   path: string;
   offset: number;
@@ -3171,35 +3234,92 @@ function MonitorPage({
   );
 }
 
-function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: AgentProcessEvent) => void }) {
+function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (processEvent: AgentProcessEvent) => void }) {
   const locale = useLocale();
-  const [processes, setProcesses] = useState<AgentProcessEvent[]>([]);
+  const [jobs, setJobs] = useState<AgentJob[]>([]);
+  const [filter, setFilter] = useState<"active" | "recent" | "stale" | "docker">(() =>
+    readMonitorPreference("skillscope.monitor.filter", "active", ["active", "recent", "stale", "docker"] as const)
+  );
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<"updated" | "runtime" | "title">(() =>
+    readMonitorPreference("skillscope.monitor.sort", "updated", ["updated", "runtime", "title"] as const)
+  );
+  const [autoRefresh, setAutoRefresh] = useState(() => readMonitorPreference("skillscope.monitor.autoRefresh", "true", ["true", "false"] as const) === "true");
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [selectedJobId, setSelectedJobId] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
   const [error, setError] = useState("");
   const [artifactTails, setArtifactTails] = useState<Record<string, TraceTailState>>({});
-  const groupedProcesses = useMemo(() => groupProcessesByAgent(processes), [processes]);
-  const activeProcesses = groupedProcesses.flatMap((group) => group.processes).filter((processEvent) => processEvent.status === "running" || processEvent.status === "started");
+  const [stopPlans, setStopPlans] = useState<Record<string, AgentStopPlan>>({});
+  const [stopResults, setStopResults] = useState<Record<string, AgentStopResult>>({});
+  const [stopError, setStopError] = useState("");
+  const [stoppingJobId, setStoppingJobId] = useState("");
   const artifactTailsRef = useRef(artifactTails);
   const artifactPathsKey = useMemo(() => {
-    const paths = processes.flatMap((processEvent) => processArtifactPaths(processEvent).map((artifact) => artifact.path));
+    const paths = jobs.flatMap((job) => job.artifacts.map((artifact) => artifact.path));
     return Array.from(new Set(paths)).sort().join("\n");
-  }, [processes]);
+  }, [jobs]);
+  const filteredJobs = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    const matchesFilter = (job: AgentJob) => {
+      if (filter === "docker") {
+        return job.containers.length > 0;
+      }
+      if (filter === "recent") {
+        return ["recent", "stopped", "failed"].includes(job.status);
+      }
+      return job.status === filter;
+    };
+    const matchesQuery = (job: AgentJob) => {
+      if (!normalizedQuery) {
+        return true;
+      }
+      return jobSearchText(job).includes(normalizedQuery);
+    };
+    return jobs
+      .filter((job) => matchesFilter(job) && matchesQuery(job))
+      .sort((left, right) => compareJobs(left, right, sort));
+  }, [filter, jobs, query, sort]);
+  const selectedJob = filteredJobs.find((job) => job.id === selectedJobId) ?? filteredJobs[0];
+  const metrics = useMemo(
+    () => ({
+      active: jobs.filter((job) => job.status === "active").length,
+      stale: jobs.filter((job) => job.status === "stale").length,
+      containers: jobs.reduce((count, job) => count + job.containers.length, 0),
+      failures: jobs.filter((job) => job.status === "failed" || job.lastStopResult?.cleanupErrors.length).length,
+      recent: jobs.filter((job) => ["recent", "stopped", "failed"].includes(job.status)).length,
+      dockerJobs: jobs.filter((job) => job.containers.length).length
+    }),
+    [jobs]
+  );
 
   useEffect(() => {
     artifactTailsRef.current = artifactTails;
   }, [artifactTails]);
 
   useEffect(() => {
+    writeMonitorPreference("skillscope.monitor.filter", filter);
+  }, [filter]);
+
+  useEffect(() => {
+    writeMonitorPreference("skillscope.monitor.sort", sort);
+  }, [sort]);
+
+  useEffect(() => {
+    writeMonitorPreference("skillscope.monitor.autoRefresh", String(autoRefresh));
+  }, [autoRefresh]);
+
+  useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const response = await fetch("/api/agent-processes");
+        const response = await fetch("/api/agent-jobs");
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
-        const payload = (await response.json()) as { processes?: AgentProcessEvent[]; updatedAt?: string };
+        const payload = (await response.json()) as { jobs?: AgentJob[]; updatedAt?: string };
         if (!cancelled) {
-          setProcesses(payload.processes ?? []);
+          setJobs(payload.jobs ?? []);
           setUpdatedAt(payload.updatedAt ?? new Date().toISOString());
           setError("");
         }
@@ -3210,12 +3330,14 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
       }
     };
     void load();
-    const timer = window.setInterval(load, 2500);
+    const timer = autoRefresh ? window.setInterval(load, 2000) : undefined;
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer) {
+        window.clearInterval(timer);
+      }
     };
-  }, []);
+  }, [autoRefresh, reloadNonce]);
 
   useEffect(() => {
     const paths = artifactPathsKey.split("\n").filter(Boolean);
@@ -3266,120 +3388,315 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
       );
     };
     void load();
-    const timer = window.setInterval(load, 2500);
+    const timer = autoRefresh ? window.setInterval(load, 2000) : undefined;
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer) {
+        window.clearInterval(timer);
+      }
     };
-  }, [artifactPathsKey]);
+  }, [artifactPathsKey, autoRefresh]);
+
+  async function previewStop(job: AgentJob) {
+    setStopError("");
+    setStoppingJobId(job.id);
+    try {
+      const response = await fetch(`/api/agent-jobs/${encodeURIComponent(job.id)}/stop/preview`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      }
+      const plan = (await response.json()) as AgentStopPlan;
+      setStopPlans((current) => ({ ...current, [job.id]: plan }));
+      setSelectedJobId(job.id);
+    } catch (previewError) {
+      setStopError(previewError instanceof Error ? previewError.message : "Failed to preview stop.");
+    } finally {
+      setStoppingJobId("");
+    }
+  }
+
+  async function executeStop(job: AgentJob) {
+    setStopError("");
+    setStoppingJobId(job.id);
+    try {
+      const response = await fetch(`/api/agent-jobs/${encodeURIComponent(job.id)}/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ signal: "SIGTERM" })
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      }
+      const payload = (await response.json()) as { job?: AgentJob; stopPlan?: AgentStopPlan; stopResult?: AgentStopResult };
+      if (payload.job) {
+        setJobs((current) => [payload.job!, ...current.filter((item) => item.id !== payload.job!.id)]);
+      }
+      if (payload.stopPlan) {
+        setStopPlans((current) => ({ ...current, [job.id]: payload.stopPlan! }));
+      }
+      if (payload.stopResult) {
+        setStopResults((current) => ({ ...current, [job.id]: payload.stopResult! }));
+      }
+      setFilter("recent");
+      setSelectedJobId(job.id);
+    } catch (stopFailure) {
+      setStopError(stopFailure instanceof Error ? stopFailure.message : "Failed to stop job.");
+    } finally {
+      setStoppingJobId("");
+    }
+  }
 
   return (
-    <div className="analysis-process-view monitor-only">
-      <div className="analysis-process-main">
+    <div className="job-control-room monitor-only">
+      <div className="job-control-main">
         <div className="process-head">
           <div>
-            <h3>{locale === "zh" ? "进程监控" : "Process Monitor"}</h3>
+            <h3>{locale === "zh" ? "Agent Job Control Room" : "Agent Job Control Room"}</h3>
             <p>
               {locale === "zh"
-                ? "只展示正在运行的 Codex / Claude agent，以及这些 agent 启动的子进程、trace 和输出产物。"
-                : "Shows running Codex / Claude agents and the child processes, traces, and artifacts they started."}
+                ? "按任务聚合本机 Codex / Claude 长任务、进度、产物、容器和安全停止结果。"
+                : "Local Codex / Claude long-running jobs, progress, artifacts, containers, and safe-stop results."}
             </p>
           </div>
-          <span className="process-status running">{activeProcesses.length} active</span>
+          <span className="process-status running">{updatedAt ? formatShortTime(updatedAt) : ""}</span>
         </div>
         {error ? <p className="error-text process-message">{error}</p> : null}
-        <div className="monitor-panel process-monitor-panel">
-          <div className="stream-head">
-            <strong>{locale === "zh" ? "正在运行的 Agent" : "Running Agents"}</strong>
-            <span>{updatedAt ? formatShortTime(updatedAt) : ""}</span>
+        {stopError ? <p className="error-text process-message">{stopError}</p> : null}
+        <div className="job-metrics">
+          <JobMetric label="active jobs" value={metrics.active} tone="active" />
+          <JobMetric label="stale jobs" value={metrics.stale} tone={metrics.stale ? "warn" : "normal"} />
+          <JobMetric label="containers" value={metrics.containers} tone="normal" />
+          <JobMetric label="recent failures" value={metrics.failures} tone={metrics.failures ? "danger" : "normal"} />
+        </div>
+        <div className="job-filter-row" role="tablist" aria-label="Job filters">
+          {(["active", "recent", "stale", "docker"] as const).map((item) => (
+            <button key={item} className={filter === item ? "segmented active" : "segmented"} onClick={() => setFilter(item)}>
+              {item === "docker" ? "Docker" : item[0].toUpperCase() + item.slice(1)}
+              <span>{jobFilterCount(item, metrics)}</span>
+            </button>
+          ))}
+        </div>
+        <div className="job-toolbar">
+          <label className="job-search">
+            <Search size={15} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search job, artifact, container, command"
+              aria-label="Search jobs"
+            />
+          </label>
+          <select value={sort} onChange={(event) => setSort(event.target.value as "updated" | "runtime" | "title")} aria-label="Sort jobs">
+            <option value="updated">Latest update</option>
+            <option value="runtime">Longest runtime</option>
+            <option value="title">Title</option>
+          </select>
+          <div className="job-live-controls">
+            <button className="secondary-button" onClick={() => setReloadNonce((value) => value + 1)}>
+              <RefreshCw size={15} />
+              Refresh
+            </button>
+            <label className="job-live-toggle">
+              <input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />
+              <span>{autoRefresh ? "Live" : "Paused"}</span>
+            </label>
           </div>
-          {groupedProcesses.length ? (
-            <div className="process-table">
-              {groupedProcesses.map((group) => (
-                <div className="agent-process-group" key={group.id}>
-                  <div className="agent-process-group-head">
-                    <div>
-                      <strong>{group.label}</strong>
-                      <span>{group.processes.length} processes · {group.activeCount} active</span>
-                    </div>
-                    {group.root?.canStopGroup ? (
-                      <button className="secondary-button danger" onClick={() => onKillProcess(group.root!)}>
-                        {locale === "zh" ? "停止整组" : "Stop Group"}
-                      </button>
-                    ) : null}
+        </div>
+        <div className="job-card-grid">
+          {filteredJobs.length ? (
+            filteredJobs.map((job) => (
+              <button
+                className={selectedJob?.id === job.id ? `agent-process-group job-card selected ${job.status}` : `agent-process-group job-card ${job.status}`}
+                key={job.id}
+                onClick={() => setSelectedJobId(job.id)}
+              >
+                <div className="job-card-head">
+                  <div>
+                    <strong>{job.title}</strong>
+                    <span>{job.agentRoot?.label ?? job.agentRoot?.command ?? "agent"} · {formatJobRuntime(job.startedAt, job.lastUpdatedAt)}</span>
                   </div>
-                  {group.processes.map((processEvent) => (
-                    <div className={`process-row ${processEvent.status}`} key={processEvent.id}>
-                      <div>
-                        <strong>{processEvent.command}</strong>
-                        <code>
-                          pid {processEvent.pid ?? "?"}{processEvent.ppid ? ` · ppid ${processEvent.ppid}` : ""}
-                          {processEvent.pgid ? ` · pgid ${processEvent.pgid}` : ""}
-                        </code>
-                        <p>{truncate(processEvent.args.join(" "), 260)}</p>
-                        <small>
-                          {processEvent.association ?? "unlinked"}
-                          {processEvent.agentRootLabel ? ` · ${processEvent.agentRootLabel}` : ""}
-                        </small>
-                        {processEvent.dockerContainers?.length ? (
-                          <small>docker {processEvent.dockerContainers.join(", ")}</small>
-                        ) : null}
-                        {processEvent.tracePath ? <small>trace {formatBytes(processEvent.traceSize ?? 0)} · {processEvent.tracePath}</small> : null}
-                        {processProgressFor(processEvent, artifactTails, locale) ? (
-                          <ProcessProgressBadge progress={processProgressFor(processEvent, artifactTails, locale)!} />
-                        ) : null}
-                        {processArtifactPaths(processEvent).length ? (
-                          <div className="process-artifacts">
-                            {processArtifactPaths(processEvent).map((artifact) => {
-                              const tail = artifactTails[artifact.path];
-                              return (
-                                <details key={artifact.path}>
-                                  <summary>
-                                    {artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {artifact.path}
-                                  </summary>
-                                  <pre>{tail?.content ? truncate(tail.content, 8000) : tail?.error ?? (locale === "zh" ? "等待内容..." : "Waiting for content...")}</pre>
-                                </details>
-                              );
-                            })}
-                          </div>
-                        ) : null}
-                      </div>
-                      {["started", "running"].includes(processEvent.status) && processEvent.canStop ? (
-                        <button className="secondary-button danger" onClick={() => onKillProcess(processEvent)}>
-                          {locale === "zh" ? "停止" : "Stop"}
-                        </button>
-                      ) : ["started", "running"].includes(processEvent.status) ? (
-                        <span>{locale === "zh" ? "受保护" : "protected"}</span>
-                      ) : (
-                        <span>{processEvent.status}</span>
-                      )}
-                    </div>
-                  ))}
+                  <span className={`job-status ${job.status}`}>{job.status}</span>
                 </div>
-              ))}
-            </div>
+                <JobProgress progress={progressWithTail(job, artifactTails)} />
+                <p>{progressWithTail(job, artifactTails).detail}</p>
+                <div className="job-card-meta">
+                  <span>{job.processes.length} proc</span>
+                  <span>{job.artifacts.length} artifacts</span>
+                  <span>{job.containers.length} containers</span>
+                  <span>{formatStaleAge(job.staleSeconds)}</span>
+                </div>
+                {job.containers.length ? <small>docker {job.containers.map((container) => container.name).join(", ")}</small> : null}
+              </button>
+            ))
           ) : (
-            <p className="muted stream-empty">{locale === "zh" ? "没有发现正在运行的 Codex / Claude agent。" : "No running Codex / Claude agent found."}</p>
+            <p className="muted stream-empty">{locale === "zh" ? "当前过滤条件下没有任务。" : "No jobs match this filter."}</p>
           )}
         </div>
       </div>
-      <aside className="analysis-process-side">
-        <div className="column-title">{locale === "zh" ? "监控范围" : "Scope"}</div>
-        <div className="path-list">
-          <div className="path-row">
-            <strong>{locale === "zh" ? "Agent" : "Agents"}</strong>
-            <code>{locale === "zh" ? "Codex / Claude 主进程" : "Codex / Claude root processes"}</code>
+      <aside className="job-detail-side">
+        {selectedJob ? (
+          <JobDetail
+            job={selectedJob}
+            artifactTails={artifactTails}
+            stopPlan={stopPlans[selectedJob.id] ?? selectedJob.stopPlan}
+            stopResult={stopResults[selectedJob.id] ?? selectedJob.lastStopResult}
+            busy={stoppingJobId === selectedJob.id}
+            onPreview={() => previewStop(selectedJob)}
+            onStop={() => executeStop(selectedJob)}
+          />
+        ) : (
+          <div className="monitor-panel job-detail-empty">
+            <strong>{locale === "zh" ? "没有任务" : "No job selected"}</strong>
           </div>
-          <div className="path-row">
-            <strong>{locale === "zh" ? "子进程" : "Children"}</strong>
-            <code>{locale === "zh" ? "仅显示由这些 agent 拉起的 bash / python / docker / npm / bench 等任务" : "Only bash / python / docker / npm / bench tasks started by those agents"}</code>
-          </div>
-          <div className="path-row">
-            <strong>{locale === "zh" ? "实时产物" : "Live artifacts"}</strong>
-            <code>{locale === "zh" ? "Codex trace、--out/-o 输出、*.log/*.jsonl/*.txt 等文件 tail" : "Codex traces, --out/-o outputs, and *.log/*.jsonl/*.txt tails"}</code>
-          </div>
-        </div>
+        )}
       </aside>
+    </div>
+  );
+}
+
+function JobMetric({ label, value, tone }: { label: string; value: number; tone: "active" | "warn" | "danger" | "normal" }) {
+  return (
+    <div className={`job-metric ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function JobDetail({
+  job,
+  artifactTails,
+  stopPlan,
+  stopResult,
+  busy,
+  onPreview,
+  onStop
+}: {
+  job: AgentJob;
+  artifactTails: Record<string, TraceTailState>;
+  stopPlan?: AgentStopPlan;
+  stopResult?: AgentStopResult;
+  busy: boolean;
+  onPreview: () => void;
+  onStop: () => void;
+}) {
+  return (
+    <div className="monitor-panel job-detail">
+      <div className="stream-head">
+        <strong>{job.title}</strong>
+        <span>{job.status}</span>
+      </div>
+      <div className="job-detail-summary">
+        <code>{job.agentRoot?.label ?? "agent root unknown"} · protected</code>
+        <code>started {formatShortTime(job.startedAt)} · updated {formatShortTime(job.lastUpdatedAt)}</code>
+        <code>grouped by agent root and process group; stop only targets listed children and containers</code>
+        {job.historyPath ? <code>{job.historyPath}</code> : null}
+      </div>
+      <JobProgress progress={progressWithTail(job, artifactTails)} />
+      <section>
+        <h4>Process Tree</h4>
+        {job.processes.map((processEvent) => (
+          <div className={`process-row ${processEvent.status}`} key={processEvent.id}>
+            <div>
+              <strong>{processEvent.command}</strong>
+              <code>
+                pid {processEvent.pid ?? "?"}{processEvent.ppid ? ` · ppid ${processEvent.ppid}` : ""}
+                {processEvent.pgid ? ` · pgid ${processEvent.pgid}` : ""}
+              </code>
+              <p>{truncate(processEvent.args.join(" "), 220)}</p>
+              <small>{processEvent.canStop ? "stoppable child" : "protected"}</small>
+            </div>
+            <span>{processEvent.status}</span>
+          </div>
+        ))}
+      </section>
+      <section>
+        <h4>Artifacts Tail</h4>
+        <div className="process-artifacts">
+          {job.artifacts.length ? (
+            job.artifacts.map((artifact) => {
+              const tail = artifactTails[artifact.path];
+              return (
+                <details key={artifact.path} open={job.artifacts.length === 1}>
+                  <summary>{artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {artifact.path}</summary>
+                  <pre>{tail?.content ? truncate(tail.content, 9000) : tail?.error ?? "Waiting for content..."}</pre>
+                </details>
+              );
+            })
+          ) : (
+            <p className="muted stream-empty">No artifacts detected.</p>
+          )}
+        </div>
+      </section>
+      <section>
+        <h4>Docker Containers</h4>
+        {job.containers.length ? (
+          <div className="job-chip-row">{job.containers.map((container) => <span key={container.name}>{container.name}</span>)}</div>
+        ) : (
+          <p className="muted stream-empty">No Docker container attached.</p>
+        )}
+      </section>
+      <section>
+        <h4>Safe Stop</h4>
+        {job.canStop ? (
+          <div className="job-stop-actions">
+            <button className="secondary-button" onClick={onPreview} disabled={busy}>
+              Preview stop
+            </button>
+            {stopPlan ? (
+              <button className="secondary-button danger" onClick={onStop} disabled={busy}>
+                Execute stop
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <p className="muted stream-empty">Root agent is protected; no stoppable child task is available.</p>
+        )}
+        {stopPlan ? <StopPlanView plan={stopPlan} /> : null}
+        {stopResult ? <StopResultView result={stopResult} /> : null}
+      </section>
+    </div>
+  );
+}
+
+function StopPlanView({ plan }: { plan: AgentStopPlan }) {
+  return (
+    <div className="stop-plan">
+      <strong>Stop preview</strong>
+      {plan.protectedRoot ? <p>Protected root: pid {plan.protectedRoot.pid ?? "?"} · {plan.protectedRoot.reason}</p> : null}
+      <p>Processes: {plan.processTargets.length ? plan.processTargets.map((target) => target.pgid ? `pgid ${target.pgid}` : `pid ${target.pid}`).join(", ") : "none"}</p>
+      <p>Containers: {plan.containers.length ? plan.containers.map((container) => container.name).join(", ") : "none"}</p>
+      {plan.warnings.map((warning) => <p className="error-text" key={warning}>{warning}</p>)}
+    </div>
+  );
+}
+
+function StopResultView({ result }: { result: AgentStopResult }) {
+  const residualProcesses = result.residualProcesses ?? [];
+  const residualContainers = result.residualContainers ?? [];
+  return (
+    <div className="stop-plan result">
+      <strong>Stop result</strong>
+      <p>Processes killed: {result.killedProcesses.filter((item) => item.ok).length}/{result.killedProcesses.length}</p>
+      <p>Containers removed: {result.removedContainers.filter((item) => item.ok).length}/{result.removedContainers.length}</p>
+      <p>Residual processes: {residualProcesses.length ? residualProcesses.map((item) => item.pgid ? `pgid ${item.pgid}` : `pid ${item.pid}`).join(", ") : "none"}</p>
+      <p>Residual containers: {residualContainers.length ? residualContainers.join(", ") : "none"}</p>
+      {result.cleanupErrors.length ? <pre>{result.cleanupErrors.join("\n")}</pre> : <p>No cleanup errors.</p>}
+    </div>
+  );
+}
+
+function JobProgress({ progress }: { progress: AgentJobProgress }) {
+  const width = progress.percent ?? 100;
+  return (
+    <div className="process-progress">
+      <div className="process-progress-meta">
+        <span>{progress.label}</span>
+        <small>{progress.latestLine ?? progress.detail}</small>
+      </div>
+      <div className={progress.percent === undefined ? "process-progress-bar indeterminate" : "process-progress-bar"}>
+        <span style={{ width: `${Math.max(4, Math.min(100, width))}%` }} />
+      </div>
     </div>
   );
 }
@@ -4011,6 +4328,125 @@ function processProgressFor(
     detail: latestLine ? truncate(latestLine, 96) : (locale === "zh" ? "产物实时更新" : "artifact updating"),
     updatedAt
   };
+}
+
+function readMonitorPreference<T extends string>(key: string, fallback: T, allowed: readonly T[]): T {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  const value = window.localStorage.getItem(key);
+  return value && allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+function writeMonitorPreference(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(key, value);
+}
+
+function jobFilterCount(filter: "active" | "recent" | "stale" | "docker", metrics: { active: number; stale: number; recent: number; dockerJobs: number }) {
+  if (filter === "active") {
+    return metrics.active;
+  }
+  if (filter === "stale") {
+    return metrics.stale;
+  }
+  if (filter === "docker") {
+    return metrics.dockerJobs;
+  }
+  return metrics.recent;
+}
+
+function jobSearchText(job: AgentJob): string {
+  return [
+    job.title,
+    job.status,
+    job.agentRoot?.label,
+    job.historyPath,
+    ...job.containers.map((container) => container.name),
+    ...job.artifacts.flatMap((artifact) => [artifact.label, artifact.path]),
+    ...job.processes.flatMap((processEvent) => [processEvent.command, processEvent.cwd, processEvent.args.join(" ")])
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+}
+
+function compareJobs(left: AgentJob, right: AgentJob, sort: "updated" | "runtime" | "title"): number {
+  if (sort === "title") {
+    return left.title.localeCompare(right.title);
+  }
+  if (sort === "runtime") {
+    return jobRuntimeMs(right) - jobRuntimeMs(left);
+  }
+  return Date.parse(right.lastUpdatedAt) - Date.parse(left.lastUpdatedAt);
+}
+
+function jobRuntimeMs(job: AgentJob): number {
+  const start = Date.parse(job.startedAt);
+  const end = Date.parse(job.lastUpdatedAt);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
+}
+
+function formatStaleAge(seconds: number): string {
+  if (seconds < 30) {
+    return "fresh";
+  }
+  if (seconds < 90) {
+    return `${seconds}s stale`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m stale`;
+}
+
+function progressWithTail(job: AgentJob, artifactTails: Record<string, TraceTailState>): AgentJobProgress {
+  const contents = job.artifacts
+    .map((artifact) => artifactTails[artifact.path])
+    .filter((tail): tail is TraceTailState => Boolean(tail?.content))
+    .map((tail) => tail.content);
+  if (!contents.length) {
+    return job.progress;
+  }
+  const content = contents.join("\n");
+  const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const latestLine = lines[lines.length - 1] ?? job.progress.latestLine;
+  const stepMatches = Array.from(content.matchAll(/\bstep[-_ ]?(\d+)(?:\s*\/\s*(\d+))?\b/gi));
+  const latestStep = stepMatches[stepMatches.length - 1];
+  if (latestStep) {
+    const current = Number(latestStep[1]);
+    const total = latestStep[2] ? Number(latestStep[2]) : undefined;
+    return {
+      label: `step ${current}${total ? `/${total}` : ""}`,
+      detail: latestLine || job.progress.detail,
+      percent: total ? Math.min(100, Math.max(0, (current / total) * 100)) : undefined,
+      updatedAt: job.progress.updatedAt,
+      latestLine
+    };
+  }
+  return {
+    label: `${lines.length} updates`,
+    detail: latestLine || job.progress.detail,
+    updatedAt: job.progress.updatedAt,
+    latestLine
+  };
+}
+
+function formatJobRuntime(startedAt: string, lastUpdatedAt: string): string {
+  const started = Date.parse(startedAt);
+  const ended = Date.parse(lastUpdatedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) {
+    return "runtime unknown";
+  }
+  const seconds = Math.max(0, Math.floor((ended - started) / 1000));
+  if (seconds < 90) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 90) {
+    return `${minutes}m`;
+  }
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 function detectProcessArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {
