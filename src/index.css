@@ -2819,6 +2819,32 @@ textarea {
   justify-content: center;
 }
 
+.job-artifact-actions {
+  margin: 8px 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.job-artifact-actions .job-path-action.compact {
+  margin: 0;
+}
+
+.job-artifact-actions > .secondary-button {
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+}
+
+.job-artifact-actions .job-path-action {
+  grid-template-columns: 1fr;
+}
+
+.job-artifact-actions .job-path-action .secondary-button {
+  width: 100%;
+}
+
 .job-next-action {
   margin: 12px;
   border: 1px solid #d8dee8;
@@ -3954,7 +3980,15 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .job-artifact-actions {
+    grid-template-columns: 1fr;
+  }
+
   .job-path-action .secondary-button {
+    width: 100%;
+  }
+
+  .job-artifact-actions > .secondary-button {
     width: 100%;
   }
 

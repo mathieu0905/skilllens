@@ -65,6 +65,7 @@ const baseEvidenceFeatures = [
   "active-job-card",
   "job-runtime-display",
   "artifact-copy-actions",
+  "artifact-output-copy",
   "job-search",
   "job-search-clear",
   "empty-state-navigation",
@@ -164,6 +165,17 @@ async function main() {
       assert(copiedPath.result?.value === true, "copy path button should be visible");
       await browser.waitForText("Copied", 15000);
       await captureEvidence(browser, "05a-artifact-copy-action.png", "artifact-copy-actions", "artifact and history paths can be copied from the job detail");
+      const copiedOutput = await browser.evaluate(`
+        (() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((item) => (item.textContent || '').includes('Copy output'));
+          button?.scrollIntoView({ block: 'center' });
+          button?.click();
+          return Boolean(button);
+        })()
+      `);
+      assert(copiedOutput.result?.value === true, "copy output button should be visible");
+      await captureEvidence(browser, "05ab-artifact-output-copy.png", "artifact-output-copy", "artifact output can be copied directly from the latest output panel");
       await browser.waitForText(path.basename(artifactPath), 15000);
       await captureEvidence(browser, "05aa-artifact-readable-label.png", "artifact-readable-label", "artifact output headers use readable file names while full paths remain copyable");
     } finally {

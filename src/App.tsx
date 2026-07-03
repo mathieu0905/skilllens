@@ -3664,7 +3664,7 @@ function SystemMonitorView({ onKillProcess: _onKillProcess }: { onKillProcess: (
         }
       } catch (loadError) {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "Failed to load processes.");
+          setError("Monitor refresh failed. Keeping any loaded jobs visible and retrying while Live is on.");
         }
       }
     };
@@ -4110,15 +4110,15 @@ function JobDetail({
   const hasStopTargets = stopPlan ? stopPlanHasTargets(stopPlan) : false;
   const nextAction = jobNextAction(job, progress, stopPlan, stopResult);
   const [copiedValue, setCopiedValue] = useState("");
-  const copyValue = async (value: string) => {
+  const copyValue = async (value: string, key = value) => {
     try {
       await copyTextToClipboard(value);
     } catch {
       // Some browser contexts block clipboard writes; still acknowledge the user's path selection.
     }
-    setCopiedValue(value);
+    setCopiedValue(key);
     window.setTimeout(() => {
-      setCopiedValue((current) => (current === value ? "" : current));
+      setCopiedValue((current) => (current === key ? "" : current));
     }, 1800);
   };
   return (
@@ -4164,10 +4164,19 @@ function JobDetail({
           {job.artifacts.length ? (
             job.artifacts.map((artifact) => {
               const tail = artifactTails[artifact.path];
+              const outputCopyKey = `output:${artifact.path}`;
               return (
                 <details key={artifact.path} open={job.artifacts.length === 1}>
                   <summary>{artifact.label} · {formatBytes(tail?.size ?? artifact.size ?? 0)} · {pathFileName(artifact.path)}</summary>
-                  <JobPathAction label="Artifact path" value={artifact.path} copied={copiedValue === artifact.path} onCopy={() => void copyValue(artifact.path)} compact />
+                  <div className="job-artifact-actions">
+                    <JobPathAction label="Artifact path" value={artifact.path} copied={copiedValue === artifact.path} onCopy={() => void copyValue(artifact.path)} compact />
+                    {tail?.content ? (
+                      <button className="secondary-button" onClick={() => void copyValue(tail.content, outputCopyKey)}>
+                        <Copy size={14} />
+                        {copiedValue === outputCopyKey ? "Copied output" : "Copy output"}
+                      </button>
+                    ) : null}
+                  </div>
                   <pre>{tail?.content ? truncate(tail.content, 9000) : tail?.error ?? "Waiting for content..."}</pre>
                 </details>
               );
