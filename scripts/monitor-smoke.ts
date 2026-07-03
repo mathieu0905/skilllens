@@ -34,6 +34,7 @@ interface AgentJob {
   canStop: boolean;
   stopPlan?: unknown;
   lastStopResult?: unknown;
+  historyPath?: string;
 }
 
 interface JobPayload {
@@ -83,6 +84,7 @@ const baseEvidenceFeatures = [
   "safe-stop-result",
   "stop-result-copy",
   "stopped-job-focused",
+  "history-json-record",
   "artifact-readable-label",
   "recent-history",
   "issues-filter",
@@ -319,6 +321,8 @@ async function main() {
     assert(!afterKill.processes.some((item) => hasArtifact(item, artifactPath)), "agent process group should be stopped from the frontend");
     const stoppedJob = await waitForJob((item) => hasArtifact(item, artifactPath) && ["stopped", "failed"].includes(item.status), 15000);
     assert(Boolean(stoppedJob.lastStopResult), "stopped job should keep the stop result in recent history");
+    await assertStoppedHistoryJson(stoppedJob);
+    await captureHistoryJsonEvidence(artifactPath, "05aaa-history-json-record.png");
     await captureRecentHistoryEvidence(artifactPath, "05b-recent-history-visible.png");
 
     await runStaleJobCase();
@@ -531,11 +535,61 @@ async function captureRecentHistoryEvidence(filePath: string, screenshotName: st
       })()
     `);
     assert(clicked.result?.value === true, "Recent filter should be visible");
+    await setMonitorSearch(browser, filePath);
     await browser.waitForText(path.basename(filePath), 15000);
     await captureEvidence(browser, screenshotName, "recent-history", "stopped jobs remain visible in Recent history with stop result context");
   } finally {
     await browser.close();
   }
+}
+
+async function captureHistoryJsonEvidence(filePath: string, screenshotName: string) {
+  const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+  try {
+    const clicked = await browser.evaluate(`
+      (() => {
+        const button = [...document.querySelectorAll('button')].find((item) => (item.textContent || '').trim().startsWith('Recent'));
+        button?.click();
+        return Boolean(button);
+      })()
+    `);
+    assert(clicked.result?.value === true, "Recent filter should be visible for history JSON evidence");
+    await setMonitorSearch(browser, filePath);
+    await browser.waitForText(path.basename(filePath), 15000);
+    const selected = await browser.evaluate(`
+      (() => {
+        const card = [...document.querySelectorAll('.job-card')]
+          .find((node) => (node.textContent || '').includes(${JSON.stringify(path.basename(filePath))}));
+        card?.scrollIntoView({ block: 'center' });
+        if (card instanceof HTMLElement) card.click();
+        return Boolean(card);
+      })()
+    `);
+    assert(selected.result?.value === true, "stopped job card should be selectable for history JSON evidence");
+    await browser.waitForText("HISTORY JSON", 15000);
+    const historyVisible = await browser.evaluate(`
+      (() => {
+        const block = [...document.querySelectorAll('.job-path-action')]
+          .find((node) => (node.querySelector('span')?.textContent || '').trim() === 'History JSON');
+        block?.scrollIntoView({ block: 'center' });
+        return Boolean(block && (block.textContent || '').includes('.skilllens/monitor-runs/'));
+      })()
+    `);
+    assert(historyVisible.result?.value === true, "recent stopped job should expose the persisted history JSON path");
+    await captureEvidence(browser, screenshotName, "history-json-record", "stopped job exposes its persisted history JSON path, and smoke verifies the JSON contains the stop result");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function assertStoppedHistoryJson(job: AgentJob) {
+  assert(job.historyPath, "stopped job should include a persisted history JSON path");
+  const resolved = path.resolve(root, job.historyPath);
+  assert(resolved.startsWith(path.join(root, ".skilllens", "monitor-runs")), `history JSON should stay under monitor-runs: ${resolved}`);
+  const record = JSON.parse(await readFile(resolved, "utf8")) as { schemaVersion?: string; job?: AgentJob };
+  assert(record.schemaVersion === "skilllens.monitor-job.v1", `unexpected history schema: ${record.schemaVersion}`);
+  assert(record.job?.id === job.id, `history JSON should record the stopped job id: ${record.job?.id}`);
+  assert(Boolean(record.job?.lastStopResult), "history JSON should persist the stop result");
 }
 
 async function clickEnabledButton(browser: BrowserSession, label: string, timeoutMs: number) {

@@ -44,6 +44,7 @@ const baseEvidenceFeatures = [
   "safe-stop-result",
   "stop-result-copy",
   "stopped-job-focused",
+  "history-json-record",
   "artifact-readable-label",
   "recent-history",
   "issues-filter",
