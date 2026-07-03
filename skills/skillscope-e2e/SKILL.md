@@ -1,11 +1,11 @@
 ---
 name: skillscope-e2e
-description: "Run a single-instance SkillScope optimization loop for one selected SkillsBench task and one selected SKILL.md: original run, native verifier check, graph-guided SkillScope analysis, gate, one optimized skill rewrite, optimized rerun, and adherence comparison. Use when the user wants to validate or optimize a specific task-skill pair before any outer agent fans the work out to more instances."
+description: "Run a single-instance SkillScope optimization loop for one selected SkillsBench task and one selected SKILL.md: original run, native verifier check, graph-guided SkillScope analysis, gate, one optimized skill rewrite, optimized rerun, and adherence comparison. Use when the user wants to validate or optimize a specific task-skill pair."
 ---
 
 # SkillScope E2E
 
-Use this skill for one selected `(taskId, skillRelPath)` instance. The unit is not a benchmark batch.
+Use this skill for one selected `(taskId, skillRelPath)` instance.
 
 The loop is:
 
@@ -20,8 +20,6 @@ select one task + one skill
   -> judge the optimized trajectory and optimized skill
   -> compare native correctness and SkillScope non-compliance
 ```
-
-For many SkillsBench instances, the outer Codex or Claude agent should fan out independent agents, each assigned one `(taskId, skillRelPath)` instance and this same skill. Do not encode batch selection, batch sizing, or multi-instance scheduling inside this skill.
 
 ## Experiment Unit
 
@@ -41,19 +39,6 @@ If a task contains multiple skills:
 - Do not merge sibling skills into the optimization target.
 - Do not optimize sibling skills in the same run.
 - If the current CLI cannot restrict rerun or propose steps to the selected skill, stop and either choose a one-skill task or add target-skill filtering before continuing.
-
-## Agent Boundary
-
-This skill is the per-instance worker. It should not decide how many instances to run.
-
-When the user wants dozens of instances, the parent agent should:
-
-- build a roster of independent `(taskId, skillRelPath)` instances;
-- skip native-passing low-NC instances when the goal is optimization;
-- launch one worker agent per selected instance, each using `$skillscope-e2e`;
-- merge the resulting per-instance reports after workers finish.
-
-Inside a `$skillscope-e2e` worker, keep all commands and artifacts scoped to the assigned instance.
 
 ## Versioning Rule
 
@@ -248,7 +233,7 @@ SKILLSCOPE_SKIP_FAILED=1 \
   bash .skilllens/experiments/<slug>/optimized-run/run-optimized.sh
 ```
 
-Native verifier pass/reward is the correctness gate. If the optimized run regresses native correctness, stop and inspect before any scale-out.
+Native verifier pass/reward is the correctness gate. If the optimized run regresses native correctness, stop and inspect before accepting the rewrite.
 
 ## Phase 7: Collect And Judge Optimized
 
@@ -338,4 +323,4 @@ End every instance with a short report:
 - native reward/test-pass delta;
 - selected-skill non-compliance delta;
 - top missed/violated selected-skill constraints;
-- decision: accept optimized skill, pass through, rerun due to environment failure, fix analyzer/optimizer, or escalate to the parent agent for scale-out.
+- decision: accept optimized skill, pass through, rerun due to environment failure, fix analyzer/optimizer, or stop.
