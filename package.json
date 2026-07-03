@@ -19,9 +19,10 @@
     "capture": "tsx scripts/capture.ts",
     "open": "tsx scripts/open.ts",
     "analyze": "tsx scripts/analyze.ts",
+    "cia:audit": "tsx scripts/cia-audit.ts",
+    "skillsbench": "tsx scripts/skillsbench.ts",
     "codex": "tsx scripts/codex.ts",
-    "install:codex-prompt": "tsx scripts/install-codex-prompt.ts",
-    "skillsbench": "tsx scripts/skillsbench.ts"
+    "install:codex-prompt": "tsx scripts/install-codex-prompt.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
