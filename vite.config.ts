@@ -3343,11 +3343,12 @@ function uniqueStrings(values: string[]): string[] {
 
 function elapsedToStartedAt(elapsed: string): string {
   const parts = elapsed.split("-");
-  const days = parts.length > 1 ? Number(parts[0]) || 0 : 0;
+  const days = parts.length > 1 ? Math.min(Number(parts[0]) || 0, 3650) : 0;
   const time = parts[parts.length - 1] ?? "0";
   const nums = time.split(":").map((item: string) => Number(item) || 0);
   const [hours, minutes, seconds] = nums.length === 3 ? nums : [0, nums[0] ?? 0, nums[1] ?? 0];
-  return new Date(Date.now() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000).toISOString();
+  const startedAt = new Date(Date.now() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000);
+  return Number.isFinite(startedAt.getTime()) ? startedAt.toISOString() : new Date().toISOString();
 }
 
 function execFileText(command: string, args: string[]): Promise<string> {

@@ -15,6 +15,8 @@ interface AgentProcessEvent {
   agentRootPid?: number;
   agentRootLabel?: string;
   artifactPaths?: Array<{ label: string; path: string; size?: number; mtime?: string }>;
+  dockerContainers?: string[];
+  canStop?: boolean;
 }
 
 interface MonitorPayload {
@@ -139,7 +141,7 @@ await writeFile(
 set -euo pipefail
 artifact="$1"
 echo "docker-case-start $$" >> "$artifact"
-setsid bash -lc 'artifact="$1"; docker rm -f ${name} >/dev/null 2>&1 || true; docker run -d --name ${name} alpine sh -c "for i in $(seq 1 120); do echo docker-smoke-step-$i; sleep 2; done" >> "$artifact" 2>&1; echo "docker-detached-container ${name}" >> "$artifact"; sleep 120' bash "$artifact" &
+setsid bash -lc 'artifact="$1"; docker rm -f ${name} >/dev/null 2>&1 || true; docker run -d --name ${name} alpine sh -c "while true; do echo docker-smoke-step; sleep 2; done" >> "$artifact" 2>&1; echo "docker-detached-container ${name}" >> "$artifact"; while true; do echo "docker-child-alive ${name}" >> "$artifact"; sleep 2; done' bash "$artifact" &
 child=$!
 wait "$child"
 `,
@@ -149,15 +151,16 @@ wait "$child"
   const child = spawn(fakeCodexPath, [dockerArtifact], { cwd: root, detached: process.platform !== "win32", stdio: "ignore" });
   child.unref();
   try {
-    await waitForProcess((item) => hasArtifact(item, dockerArtifact) && JSON.stringify(item).includes(name), 45000);
+    const dockerProcess = await waitForProcess((item) => Boolean(item.canStop) && hasArtifact(item, dockerArtifact) && JSON.stringify(item).includes(name), 45000);
+    assert(dockerProcess.dockerContainers?.includes(name), "docker container name should be associated with the monitored child process");
     await waitForArtifactTextAt(dockerArtifact, "docker-detached-container", 45000);
     const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
     try {
-      await browser.waitForText(name, 30000);
+      await browser.waitForText("fake-codex-docker.log", 30000);
       await browser.evaluate(`
         (() => {
           const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes(${JSON.stringify(name)}));
+            .find((node) => (node.textContent || '').includes('fake-codex-docker.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
           if (!group) return false;
           group.scrollIntoView({ block: 'center' });
           group.querySelectorAll('details').forEach((item) => { item.open = true; });
@@ -169,7 +172,7 @@ wait "$child"
       const clicked = await browser.evaluate(`
         (() => {
           const group = [...document.querySelectorAll('.agent-process-group')]
-            .find((node) => (node.textContent || '').includes(${JSON.stringify(name)}));
+            .find((node) => (node.textContent || '').includes('fake-codex-docker.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
           const groupButton = group?.querySelector('.agent-process-group-head button.danger');
           if (groupButton) return 'unsafe-group-button';
           const button = group?.querySelector('.process-row button.danger');
@@ -202,7 +205,9 @@ async function assertServer() {
 
 async function listProcesses(): Promise<MonitorPayload> {
   const response = await fetch(`${baseUrl}/api/agent-processes`);
-  assert(response.ok, `failed to list processes: HTTP ${response.status}`);
+  if (!response.ok) {
+    throw new Error(`failed to list processes: HTTP ${response.status} ${await response.text()}`);
+  }
   return (await response.json()) as MonitorPayload;
 }
 

@@ -23,6 +23,7 @@
     "skillsbench": "tsx scripts/skillsbench.ts",
     "codex": "tsx scripts/codex.ts",
     "monitor:smoke": "tsx scripts/monitor-smoke.ts",
+    "monitor:smoke:docker": "tsx scripts/monitor-smoke.ts --docker",
     "install:codex-prompt": "tsx scripts/install-codex-prompt.ts"
   },
   "dependencies": {
