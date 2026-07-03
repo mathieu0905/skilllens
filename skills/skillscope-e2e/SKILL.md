@@ -45,7 +45,7 @@ Recommended phase agents:
 | `optimized-judge-agent` | `skillscope-analyzer` | one optimized trial plus one optimized skill | analyzer IR and findings |
 | `comparison-agent` | `skillscope-e2e` | original vs optimized aggregate | metrics table and scale/stop decision |
 
-Pass file paths, task IDs, trial IDs, and the expected output directory through phase-agent prompts. Large batches should shard runner agents by task set and let the `judge` / `propose` commands launch per-skill Codex analyzer or optimizer runs with cache reuse.
+Pass file paths, task IDs, trial IDs, and the expected output directory through phase-agent prompts. Large batches should shard runner agents by task set and let the `judge` / `propose` commands launch per-skill Codex analyzer or optimizer runs with cache reuse and `--agent-concurrency`.
 
 The outer e2e agent must not perform blind trace analysis itself. It should inspect aggregate reports and handoff artifacts, then launch the correct phase agent or command for the next step.
 
@@ -184,6 +184,7 @@ npm run skillsbench -- judge \
   --plan .skilllens/experiments/<slug>/original/run-plan.json \
   --trials-file .skilllens/experiments/<slug>/original/collected/trials.json \
   --out .skilllens/experiments/<slug>/original/agent-analysis \
+  --agent-concurrency 4 \
   --agent-timeout-ms 1200000
 ```
 
@@ -211,6 +212,7 @@ npm run skillsbench -- propose \
   --min-failures 1 \
   --optimize-nc-threshold 0.1 \
   --max-edits-per-skill 4 \
+  --agent-concurrency 4 \
   --agent-timeout-ms 1200000
 ```
 
@@ -282,6 +284,7 @@ npm run skillsbench -- judge \
   --plan .skilllens/experiments/<slug>/optimized-analysis/run-plan.json \
   --trials-file .skilllens/experiments/<slug>/optimized-analysis/collected/trials.json \
   --out .skilllens/experiments/<slug>/optimized-analysis/agent-analysis \
+  --agent-concurrency 4 \
   --agent-timeout-ms 1200000
 ```
 

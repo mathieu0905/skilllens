@@ -45,6 +45,7 @@ interface CliOptions {
   includeNoSkill: boolean;
   maxTasks?: number;
   maxAgentAnalyses?: number;
+  agentConcurrency: number;
   agentTimeoutMs: number;
   minFailures: number;
   optimizeNcThreshold: number;
@@ -332,7 +333,12 @@ async function judgeTrials(options: CliOptions) {
   const taskById = new Map(plan.tasks.map((task) => [task.id, task]));
   const records: AnalysisRecord[] = [];
   const repeated = new Map<string, ConstraintAggregate>();
-  let launched = 0;
+  const jobs: Array<{
+    trial: TrialRecord;
+    skillPath: string;
+    rel: string;
+    project: SkillLensProject;
+  }> = [];
 
   await mkdir(projectDir, { recursive: true });
   for (const trial of trials.filter((candidate) => candidate.mode === "with")) {
@@ -345,9 +351,6 @@ async function judgeTrials(options: CliOptions) {
     const result = await readResult(trial.resultPath);
     const nativeVerifier = await readNativeVerifierSummary(trial);
     for (const skillPath of task.skillPaths) {
-      if (options.maxAgentAnalyses && launched >= options.maxAgentAnalyses) {
-        break;
-      }
       const skill = await readFile(skillPath, "utf8");
       const project = createProject(
         `${trial.taskId} / ${path.basename(path.dirname(skillPath))} / ${trial.id}`,
@@ -369,6 +372,12 @@ async function judgeTrials(options: CliOptions) {
         trial.dir
       );
       const rel = path.relative(task.taskDir, skillPath);
+      jobs.push({ trial, skillPath, rel, project });
+    }
+  }
+
+  const selectedJobs = options.maxAgentAnalyses ? jobs.slice(0, options.maxAgentAnalyses) : jobs;
+  const results = await runWithConcurrency(selectedJobs, options.agentConcurrency, async ({ trial, skillPath, rel, project }) => {
       const judged = await runSkillScopeAgentJudge(project, {
         outDir,
         taskId: trial.taskId,
@@ -377,7 +386,6 @@ async function judgeTrials(options: CliOptions) {
         force: options.force,
         timeoutMs: options.agentTimeoutMs
       });
-      launched += judged.cached ? 0 : 1;
       const judgedProject: SkillLensProject = {
         ...project,
         findings: judged.findings,
@@ -390,15 +398,15 @@ async function judgeTrials(options: CliOptions) {
       const analysisPath = path.join(projectDir, `${safeName(trial.taskId)}__${safeName(trial.id)}__${safeName(rel)}.json`);
       await writeFile(analysisPath, exportAnalysisJson(judgedProject));
       const record = analysisRecordFromProject(judgedProject, trial, skillPath, rel, analysisPath);
-      records.push(record);
-      addRepeatedFailures(repeated, judgedProject, trial, rel);
       console.log(
         `[judge] ${judged.cached ? "cache" : "agent"} ${trial.taskId}/${rel}: ${record.counts.covered} covered, ${record.counts.missed} missed, ${record.counts.violated} violated`
       );
-    }
-    if (options.maxAgentAnalyses && launched >= options.maxAgentAnalyses) {
-      break;
-    }
+      return { record, judgedProject, trial, rel };
+  });
+
+  for (const result of results) {
+    records.push(result.record);
+    addRepeatedFailures(repeated, result.judgedProject, result.trial, result.rel);
   }
 
   const aggregate = aggregateAnalyses(plan, records, [...repeated.values()]);
@@ -406,6 +414,7 @@ async function judgeTrials(options: CliOptions) {
   await writeFile(path.join(outDir, "violation-rates.json"), `${JSON.stringify(aggregate, null, 2)}\n`);
   await writeFile(path.join(outDir, "violation-rates.md"), renderViolationMarkdown(aggregate));
   console.log(`Agent-judged ${records.length} skill/trial pair(s).`);
+  console.log(`Agent concurrency: ${options.agentConcurrency}`);
   console.log(`Wrote ${path.join(outDir, "violation-rates.json")} and ${path.join(outDir, "violation-rates.md")}`);
 }
 
@@ -912,6 +921,27 @@ function killChildProcessGroup(pid: number | undefined, signal: NodeJS.Signals) 
   }
 }
 
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const limit = Math.max(1, Math.floor(concurrency || 1));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runWorker));
+  return results;
+}
+
 async function proposeOptimizedSkills(options: CliOptions) {
   const planPath = requirePath(options.plan, "--plan");
   const analysisPath = requirePath(options.analysis, "--analysis");
@@ -921,7 +951,13 @@ async function proposeOptimizedSkills(options: CliOptions) {
   const tasksById = new Map(plan.tasks.map((task) => [task.id, task]));
   const recordsByTaskSkill = groupAnalysisRecordsForOptimization(aggregate.analyses, options);
   const patches: Record<string, unknown> = {};
-  let launched = 0;
+  const jobs: Array<{
+    key: string;
+    records: AnalysisRecord[];
+    task: TaskPlan;
+    originalSkillPath: string;
+    targetSkillPath: string;
+  }> = [];
 
   await mkdir(outRoot, { recursive: true });
   for (const task of plan.tasks) {
@@ -931,9 +967,6 @@ async function proposeOptimizedSkills(options: CliOptions) {
   }
 
   for (const [key, records] of recordsByTaskSkill) {
-    if (options.maxAgentAnalyses && launched >= options.maxAgentAnalyses) {
-      break;
-    }
     const gate = optimizationCandidateGate(records, options);
     if (!gate.optimize) {
       patches[key] = {
@@ -969,6 +1002,11 @@ async function proposeOptimizedSkills(options: CliOptions) {
       };
       continue;
     }
+    jobs.push({ key, records, task, originalSkillPath, targetSkillPath });
+  }
+
+  const selectedJobs = options.maxAgentAnalyses ? jobs.slice(0, options.maxAgentAnalyses) : jobs;
+  await runWithConcurrency(selectedJobs, options.agentConcurrency, async ({ key, records, task, originalSkillPath, targetSkillPath }) => {
     const prepared = await prepareFrameworkOptimizationInput({
       outRoot,
       key,
@@ -978,7 +1016,7 @@ async function proposeOptimizedSkills(options: CliOptions) {
     });
     if (!prepared) {
       patches[key] = { skipped: "missing agent-judge IR artifacts", recordCount: records.length };
-      continue;
+      return;
     }
     const optimized = await runFrameworkSkillOptimizerForBatch({
       prepared,
@@ -987,9 +1025,6 @@ async function proposeOptimizedSkills(options: CliOptions) {
       timeoutMs: options.agentTimeoutMs,
       maxEditsPerSkill: options.maxEditsPerSkill
     });
-    if (!optimized.cached) {
-      launched += 1;
-    }
     patches[key] = {
       cached: optimized.cached,
       recordCount: records.length,
@@ -1000,11 +1035,12 @@ async function proposeOptimizedSkills(options: CliOptions) {
       optimizationPacketPath: optimized.optimizationPacketPath
     };
     console.log(`[propose] ${optimized.cached ? "cache" : "agent"} ${key}: ${optimized.optimizedSkillPath}`);
-  }
+  });
 
   await writeFile(path.join(outRoot, "skill-patches.json"), `${JSON.stringify(patches, null, 2)}\n`);
   await writeFile(path.join(outRoot, "skill-patches.md"), renderFrameworkPatchSummary(patches));
   console.log(`Wrote framework-optimized skill candidates under ${outRoot}`);
+  console.log(`Agent concurrency: ${options.agentConcurrency}`);
   console.log("Optimizer candidates and pass-through decisions were based on SkillScope constraints/graph/trace-facts/findings artifacts.");
 }
 
@@ -2539,6 +2575,7 @@ function parseArgs(args: string[]): CliOptions {
     trials: 1,
     taskIds: [],
     includeNoSkill: false,
+    agentConcurrency: 4,
     agentTimeoutMs: 600000,
     minFailures: 1,
     optimizeNcThreshold: 0.1,
@@ -2605,6 +2642,13 @@ function parseArgs(args: string[]): CliOptions {
         break;
       case "max-agent-analyses":
         options.maxAgentAnalyses = Number.parseInt(next, 10) || undefined;
+        index += 1;
+        break;
+      case "agent-concurrency":
+        options.agentConcurrency = Number.parseInt(next, 10) || options.agentConcurrency;
+        if (!Number.isFinite(options.agentConcurrency) || options.agentConcurrency < 1) {
+          options.agentConcurrency = 1;
+        }
         index += 1;
         break;
       case "agent-timeout-ms":
@@ -2903,7 +2947,8 @@ Options:
   --trials                 Commands to generate per task. Default: 1.
   --task                   Repeat to restrict to specific task IDs.
   --max-tasks              Plan only the first N tasks for smoke tests.
-  --max-agent-analyses     Limit live Codex analyzer launches for smoke/debug.
+  --max-agent-analyses     Limit skill-use analyzer/optimizer jobs considered for smoke/debug.
+  --agent-concurrency      Parallel Codex analyzer/optimizer jobs for judge/propose. Default: 4.
   --agent-timeout-ms       Per-skill Codex analyzer timeout for judge. Default: 600000.
   --force                  Re-run cached agent analyses.
   --include-no-skill       Also generate no-skill baseline commands.
