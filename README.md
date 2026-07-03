@@ -18,6 +18,22 @@ SkillScope is not an agent runner, benchmark runner, or observability platform. 
 | --- | --- |
 | ![Skill graph with observed path and skipped branches](docs/assets/screenshots/skill-graph.png) | ![Agent analysis artifacts and cached run](docs/assets/screenshots/analysis-process.png) |
 
+| Optimization results / 优化结果 |
+| --- |
+| ![SkillsBench original-vs-optimized verifier and SkillScope non-compliance view](docs/assets/screenshots/skillsbench-optimization.png) |
+
+## Optimization Snapshot / 优化效果快照
+
+Early single-instance SkillsBench checks show the loop improving both verifier outcomes and SkillScope non-compliance on real coding-agent traces.
+
+中文：当前单实例 SkillsBench 检查已经能看到，闭环优化可以改善 verifier 结果和 SkillScope 违约率。
+
+| Task | Native verifier | SkillScope NC | Decision |
+| --- | --- | --- | --- |
+| `court-form-filling` | `4/5 -> 5/5` tests, reward `0 -> 1` | `25% -> 0%` | accept optimized skill |
+| `manufacturing-fjsp-optimization` | `13/15 -> 15/15` tests, reward `0 -> 1` | `50% -> 2.6%` | accept optimized skill |
+| `azure-bgp-oscillation-route-leak` | `3/4 -> 3/4` tests, reward `0 -> 0` | `27.8% -> 23.3%`, final-output NC `35.9% -> 8.7%` | not accepted; native still failed |
+
 ## What It Does / 功能
 
 - Discovers local Codex and Claude Code sessions.
@@ -168,6 +184,123 @@ npm run skillsbench -- plan --skillsbench-root /path/to/skillsbench --trials 3
 See [docs/skillsbench-experiment.md](docs/skillsbench-experiment.md).
 
 The audit writes ignored local artifacts under `.skilllens/`.
+
+## Running More SkillsBench Experiments / 跑更多 SkillsBench 实验
+
+Use the single-instance loop first. One instance means one SkillsBench task plus one selected `SKILL.md`.
+
+中文：先跑单实例闭环。一个实例就是一个 SkillsBench task 加一个选定的 `SKILL.md`。
+
+```text
+original run
+  -> native verifier + SkillScope judge
+  -> gate: skip low-risk passing cases, optimize high-NC or failing cases
+  -> one optimized skill
+  -> rerun + native verifier + SkillScope judge
+  -> compare verifier pass count and non-compliance
+```
+
+Find clean one-skill tasks:
+
+```bash
+git clone https://github.com/benchflow-ai/skillsbench.git .skilllens/vendor/skillsbench
+
+python - <<'PY'
+from pathlib import Path
+root = Path('.skilllens/vendor/skillsbench/tasks')
+for task in sorted(root.iterdir()):
+    skills_dir = task / 'environment' / 'skills'
+    skills = sorted(skills_dir.glob('*/SKILL.md')) if skills_dir.exists() else []
+    if len(skills) == 1:
+        print(f'{task.name}\t{skills[0].relative_to(task)}')
+PY
+```
+
+Run one selected instance with the bundled workflow skill:
+
+```text
+Use $skillscope-e2e on taskId=<task-id>, skillRelPath=<environment/skills/.../SKILL.md>, slug=<experiment-slug>.
+```
+
+The equivalent CLI phases are:
+
+```bash
+npm run build
+
+npm run skillsbench -- plan \
+  --skillsbench-root .skilllens/vendor/skillsbench \
+  --out .skilllens/experiments/<slug>/original \
+  --agent codex \
+  --model gpt-5.5 \
+  --trials 1 \
+  --task <task-id> \
+  --bench-arg --sandbox \
+  --bench-arg docker \
+  --bench-arg --usage-tracking \
+  --bench-arg off
+
+SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
+SKILLSCOPE_SKIP_FAILED=1 \
+  bash .skilllens/experiments/<slug>/original/run-original.sh
+
+npm run skillsbench -- collect \
+  --runs-root .skilllens/experiments/<slug>/original/jobs \
+  --out .skilllens/experiments/<slug>/original/collected
+
+npm run skillsbench -- judge \
+  --plan .skilllens/experiments/<slug>/original/run-plan.json \
+  --trials-file .skilllens/experiments/<slug>/original/collected/trials.json \
+  --out .skilllens/experiments/<slug>/original/agent-analysis \
+  --agent-concurrency 1 \
+  --agent-timeout-ms 1200000
+```
+
+Only optimize when native verifier failed, or selected-skill SkillScope non-compliance is high, or final/artifact constraints were violated or ignored. If native passes and NC is low, record pass-through and do not rewrite.
+
+中文：只有 native verifier 失败、选中 skill 的 NC 高、或 final/artifact 约束被违反/忽略时才优化。native 已通过且 NC 低的实例直接 pass-through，不改 skill。
+
+Then generate exactly one optimized skill and rerun:
+
+```bash
+npm run skillsbench -- propose \
+  --plan .skilllens/experiments/<slug>/original/run-plan.json \
+  --analysis .skilllens/experiments/<slug>/original/agent-analysis/violation-rates.json \
+  --out .skilllens/experiments/<slug>/optimized-skills \
+  --min-failures 1 \
+  --optimize-nc-threshold 0.1 \
+  --max-edits-per-skill 4 \
+  --agent-concurrency 1 \
+  --agent-timeout-ms 1200000
+
+npm run skillsbench -- rerun-plan \
+  --plan .skilllens/experiments/<slug>/original/run-plan.json \
+  --optimized-skills-root .skilllens/experiments/<slug>/optimized-skills \
+  --out .skilllens/experiments/<slug>/optimized-run
+
+SKILLSCOPE_TRIAL_TIMEOUT_SECONDS=7200 \
+SKILLSCOPE_SKIP_FAILED=1 \
+  bash .skilllens/experiments/<slug>/optimized-run/run-optimized.sh
+
+npm run skillsbench -- collect \
+  --runs-root .skilllens/experiments/<slug>/optimized-run/jobs \
+  --out .skilllens/experiments/<slug>/optimized-analysis/collected
+
+npm run skillsbench -- analysis-plan \
+  --plan .skilllens/experiments/<slug>/original/run-plan.json \
+  --optimized-skills-root .skilllens/experiments/<slug>/optimized-skills \
+  --out .skilllens/experiments/<slug>/optimized-analysis
+
+npm run skillsbench -- judge \
+  --plan .skilllens/experiments/<slug>/optimized-analysis/run-plan.json \
+  --trials-file .skilllens/experiments/<slug>/optimized-analysis/collected/trials.json \
+  --out .skilllens/experiments/<slug>/optimized-analysis/agent-analysis \
+  --agent-concurrency 1 \
+  --agent-timeout-ms 1200000
+```
+
+For more scale, launch multiple Codex workers in parallel from an outer coordinator, one worker per `(taskId, skillRelPath, slug)`. Keep each worker single-instance so artifacts stay debuggable.
+
+中文：要并发时，用外层 coordinator 分发多个 Codex worker，每个 worker 只处理一个 `(taskId, skillRelPath, slug)`，这样产物和失败原因都容易追踪。
 
 ## Local Data / 本地数据
 

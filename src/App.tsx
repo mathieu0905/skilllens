@@ -2,6 +2,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  BarChart3,
   CheckCircle2,
   Clock3,
   Code2,
@@ -25,6 +26,7 @@ import { analyzeCoverage, findCandidates, summarizeCoverage } from "./lib/covera
 import { createProject, createProjectFromCaptureBundle } from "./lib/project";
 import { exportAnalysisJson, exportHtmlReport, generateMarkdownReport, percent } from "./lib/report";
 import { truncate } from "./lib/text";
+import { skillsBenchShowcaseCases, type SkillsBenchShowcaseCase } from "./data/skillsbenchResults";
 import type {
   CaptureBundle,
   CaptureRegistryEntry,
@@ -39,7 +41,7 @@ import type {
   TraceEvent
 } from "./lib/types";
 
-type View = "coverage" | "graph" | "timeline" | "compare" | "analysis" | "monitor" | "rewrite" | "report";
+type View = "coverage" | "graph" | "timeline" | "compare" | "analysis" | "monitor" | "experiments" | "rewrite" | "report";
 type TimelineFilter = "all" | "skill" | "violations" | "tools" | "final";
 type Locale = "zh" | "en";
 
@@ -338,6 +340,7 @@ const copy = {
       compare: "对比",
       analysis: "分析过程",
       monitor: "进程监控",
+      experiments: "实验结果",
       rewrite: "优化 Skill",
       report: "报告"
     } satisfies Record<View, string>,
@@ -507,6 +510,7 @@ const copy = {
       compare: "Compare",
       analysis: "Analysis",
       monitor: "Monitor",
+      experiments: "Experiments",
       rewrite: "Rewrite Skill",
       report: "Report"
     } satisfies Record<View, string>,
@@ -667,6 +671,7 @@ const viewIcons: Record<View, typeof FileText> = {
   compare: GitCompare,
   analysis: Code2,
   monitor: Activity,
+  experiments: BarChart3,
   rewrite: PencilLine,
   report: FileJson
 };
@@ -696,7 +701,7 @@ function statusLabel(status: CoverageStatus, locale: Locale): string {
 
 function viewLabelsFor(locale: Locale): Array<{ id: View; label: string; icon: typeof FileText }> {
   return (Object.keys(viewIcons) as View[])
-    .filter((id) => id !== "monitor")
+    .filter((id) => id !== "monitor" && id !== "experiments")
     .map((id) => ({ id, label: ui(locale).views[id], icon: viewIcons[id] }));
 }
 
@@ -711,10 +716,19 @@ function initialViewFromUrl(): View {
     value === "compare" ||
     value === "analysis" ||
     value === "monitor" ||
+    value === "experiments" ||
     value === "rewrite" ||
     value === "report"
     ? value
     : "coverage";
+}
+
+function initialShowcaseCaseFromUrl(): string {
+  if (typeof window === "undefined") {
+    return skillsBenchShowcaseCases[0]?.slug ?? "";
+  }
+  const requested = new URLSearchParams(window.location.search).get("case");
+  return skillsBenchShowcaseCases.find((item) => item.slug === requested)?.slug ?? skillsBenchShowcaseCases[0]?.slug ?? "";
 }
 
 function App() {
@@ -724,6 +738,7 @@ function App() {
   const [projectId, setProjectId] = useState("");
   const [compareId, setCompareId] = useState("");
   const [view, setView] = useState<View>(() => initialViewFromUrl());
+  const [showcaseCaseSlug, setShowcaseCaseSlug] = useState(() => initialShowcaseCaseFromUrl());
   const project = projects.find((candidate) => candidate.id === projectId) ?? projects[0] ?? demoProjects[0];
   const compareProject = projects.find((candidate) => candidate.id === compareId) ?? projects.find((candidate) => candidate.id !== project.id) ?? project;
   const [selectedUnitId, setSelectedUnitId] = useState("");
@@ -745,7 +760,10 @@ function App() {
   const [localProjectKey, setLocalProjectKey] = useState("all");
   const [localIndexMeta, setLocalIndexMeta] = useState<LocalSessionIndexMeta>({});
   const [isLoadingLocalSessions, setIsLoadingLocalSessions] = useState(true);
-  const [isHome, setIsHome] = useState(() => initialViewFromUrl() !== "monitor");
+  const [isHome, setIsHome] = useState(() => {
+    const initial = initialViewFromUrl();
+    return initial !== "monitor" && initial !== "experiments";
+  });
   const [capturingSkillUseId, setCapturingSkillUseId] = useState("");
   const [openingSkillUse, setOpeningSkillUse] = useState<LocalSkillUse | null>(null);
   const [isAgentAnalyzing, setIsAgentAnalyzing] = useState(false);
@@ -1349,6 +1367,12 @@ function App() {
     );
   }
 
+  function selectShowcaseCase(slug: string) {
+    setShowcaseCaseSlug(slug);
+    const params = new URLSearchParams({ view: "experiments", case: slug });
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }
+
   return (
     <LocaleContext.Provider value={locale}>
     <div className="app-shell">
@@ -1415,9 +1439,26 @@ function App() {
               setIsHome(false);
               window.history.replaceState(null, "", `${window.location.pathname}?view=monitor`);
             }}
+            onOpenExperiments={() => {
+              setView("experiments");
+              setIsHome(false);
+              const params = new URLSearchParams({ view: "experiments", case: showcaseCaseSlug });
+              window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+            }}
           />
         ) : openingSkillUse ? (
           <OpeningPanel skillUse={openingSkillUse} />
+        ) : view === "experiments" ? (
+          <SkillsBenchResultsHome
+            cases={skillsBenchShowcaseCases}
+            selectedSlug={showcaseCaseSlug}
+            onSelect={selectShowcaseCase}
+            onBack={() => {
+              setIsHome(true);
+              setView("coverage");
+              window.history.replaceState(null, "", window.location.pathname);
+            }}
+          />
         ) : view === "monitor" ? (
           <MonitorPage
             onBack={() => {
@@ -1671,7 +1712,8 @@ function SessionHome({
   onRefresh,
   onOpenSkillUse,
   onOpenDemo,
-  onOpenMonitor
+  onOpenMonitor,
+  onOpenExperiments
 }: {
   skillUses: LocalSkillUse[];
   projects: LocalProject[];
@@ -1685,6 +1727,7 @@ function SessionHome({
   onOpenSkillUse: (skillUse: LocalSkillUse) => void;
   onOpenDemo: () => void;
   onOpenMonitor: () => void;
+  onOpenExperiments: () => void;
 }) {
   const locale = useLocale();
   const t = ui(locale);
@@ -1737,6 +1780,18 @@ function SessionHome({
             {locale === "zh"
               ? "按 Codex / Claude 分组，监控它们启动的子进程、trace 和输出文件。"
               : "Grouped by Codex / Claude, with child processes, traces, and output artifacts."}
+          </small>
+        </button>
+        <button className="home-mode-card experiments" onClick={onOpenExperiments}>
+          <span>
+            <BarChart3 size={19} />
+            {locale === "zh" ? "SkillsBench 优化结果" : "SkillsBench Optimization"}
+          </span>
+          <strong>{locale === "zh" ? "对比原始 skill 和优化后 skill" : "Compare original and optimized skills"}</strong>
+          <small>
+            {locale === "zh"
+              ? "展示 native verifier、SkillScope NC、违反/忽略变化和实验产物。"
+              : "Show native verifier, SkillScope NC, violation/ignored deltas, and artifacts."}
           </small>
         </button>
         <div className="home-mode-card passive">
@@ -1815,6 +1870,282 @@ function SessionHome({
       </div>
     </section>
   );
+}
+
+function SkillsBenchResultsHome({
+  cases,
+  selectedSlug,
+  onSelect,
+  onBack
+}: {
+  cases: SkillsBenchShowcaseCase[];
+  selectedSlug: string;
+  onSelect: (slug: string) => void;
+  onBack: () => void;
+}) {
+  const locale = useLocale();
+  const selected = cases.find((candidate) => candidate.slug === selectedSlug) ?? cases[0];
+  const accepted = cases.filter((candidate) => candidate.status === "accepted").length;
+  const completed = cases.filter((candidate) => candidate.status !== "blocked").length;
+  const improved = cases.filter((candidate) => {
+    if (!candidate.optimized || candidate.original.nonComplianceRate === null || candidate.optimized.nonComplianceRate === null) {
+      return false;
+    }
+    return candidate.optimized.nonComplianceRate < candidate.original.nonComplianceRate;
+  }).length;
+
+  return (
+    <section className="session-home benchmark-home">
+      <div className="session-home-head">
+        <div>
+          <h2>{locale === "zh" ? "SkillsBench 优化实验" : "SkillsBench Optimization Results"}</h2>
+          <p>
+            {locale === "zh"
+              ? "用 SkillScope 先分析原始轨迹的违反/忽略，再生成一条优化 skill，重新跑 verifier 并复评 NC。"
+              : "Analyze original trace violations/ignored constraints with SkillScope, rewrite one optimized skill, rerun the verifier, then rejudge NC."}
+          </p>
+          <small className="index-meta">
+            {completed} completed · {accepted} accepted · {improved} SkillScope NC improved
+          </small>
+        </div>
+        <div className="session-home-actions">
+          <button className="secondary-button" onClick={onBack}>
+            <ArrowLeft size={16} />
+            {locale === "zh" ? "返回主页" : "Back Home"}
+          </button>
+        </div>
+      </div>
+
+      <div className="home-mode-grid benchmark-summary-grid">
+        <div className="home-mode-card passive">
+          <span>
+            <CheckCircle2 size={19} />
+            {locale === "zh" ? "Native verifier" : "Native verifier"}
+          </span>
+          <strong>2 / 3 {locale === "zh" ? "完成样例优化后通过" : "completed cases passed after rewrite"}</strong>
+          <small>{locale === "zh" ? "展示通过测试数，不只看 reward 0/1。" : "Shows passed-test counts, not only reward 0/1."}</small>
+        </div>
+        <div className="home-mode-card passive">
+          <span>
+            <BarChart3 size={19} />
+            SkillScope NC
+          </span>
+          <strong>3 / 3 {locale === "zh" ? "完成样例下降" : "completed cases improved"}</strong>
+          <small>{locale === "zh" ? "NC 来自 SkillScope 对违反和忽略约束的复评。" : "NC comes from SkillScope rejudging violated and ignored constraints."}</small>
+        </div>
+        <div className="home-mode-card passive">
+          <span>
+            <GitBranch size={19} />
+            {locale === "zh" ? "单实例闭环" : "Single-instance loop"}
+          </span>
+          <strong>{locale === "zh" ? "原始跑一次，再优化一条" : "One original run, one optimized run"}</strong>
+          <small>{locale === "zh" ? "批量并发由外层 agent 分发，每个 worker 只处理一个 instance。" : "Batch concurrency is external; each worker handles one instance."}</small>
+        </div>
+      </div>
+
+      <div className="project-session-layout">
+        <aside className="local-projects benchmark-case-list">
+          {cases.map((item) => (
+            <button
+              key={item.slug}
+              className={selected?.slug === item.slug ? "active" : ""}
+              onClick={() => onSelect(item.slug)}
+              title={item.skillRelPath}
+            >
+              <strong>{item.taskId}</strong>
+              <span>{item.title}</span>
+              <span>{caseStatusLabel(item, locale)} · {runPassLabel(item.optimized ?? item.original)}</span>
+              <small>{item.skillRelPath}</small>
+            </button>
+          ))}
+        </aside>
+
+        <div className="local-sessions benchmark-detail-panel">
+          {selected ? <SkillsBenchCaseDetail item={selected} /> : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SkillsBenchCaseDetail({ item }: { item: SkillsBenchShowcaseCase }) {
+  const locale = useLocale();
+  const statusClass = `benchmark-status ${item.status}`;
+  return (
+    <div className="benchmark-detail">
+      <div className="benchmark-detail-head">
+        <div>
+          <span className={statusClass}>{caseStatusLabel(item, locale)}</span>
+          <h3>{item.taskId}</h3>
+          <p>{item.outcome}</p>
+        </div>
+        <div className="benchmark-skill-path">
+          <span>{locale === "zh" ? "Skill" : "Skill"}</span>
+          <code>{item.skillRelPath}</code>
+        </div>
+      </div>
+
+      {item.status === "blocked" ? (
+        <div className="benchmark-blocked">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>{locale === "zh" ? "未进入 agent/verifier" : "Did not reach agent/verifier"}</strong>
+            <p>{item.blockedReason}</p>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="benchmark-metric-grid">
+        <RunMetricCard label={locale === "zh" ? "原始 Skill" : "Original Skill"} run={item.original} />
+        <RunMetricCard label={locale === "zh" ? "优化后 Skill" : "Optimized Skill"} run={item.optimized} muted={!item.optimized} />
+        <DeltaMetricCard item={item} />
+      </div>
+
+      <div className="benchmark-columns">
+        <FindingList title={locale === "zh" ? "原始轨迹主要问题" : "Original Trace Findings"} findings={item.topOriginalFindings} />
+        <FindingList title={locale === "zh" ? "优化后剩余问题" : "Remaining After Rewrite"} findings={item.topOptimizedFindings} empty={locale === "zh" ? "没有主要剩余违反。" : "No major remaining violation."} />
+      </div>
+
+      <div className="benchmark-coverage-row">
+        <CoveragePills label={locale === "zh" ? "原始覆盖" : "Original coverage"} counts={item.original.counts} />
+        {item.optimized ? <CoveragePills label={locale === "zh" ? "优化后覆盖" : "Optimized coverage"} counts={item.optimized.counts} /> : null}
+      </div>
+
+      <div className="benchmark-artifacts">
+        <strong>{locale === "zh" ? "本地产物" : "Local artifacts"}</strong>
+        {item.artifactPaths.map((artifact) => (
+          <code key={artifact}>{artifact}</code>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RunMetricCard({
+  label,
+  run,
+  muted = false
+}: {
+  label: string;
+  run?: SkillsBenchShowcaseCase["original"];
+  muted?: boolean;
+}) {
+  const locale = useLocale();
+  if (!run) {
+    return (
+      <div className="benchmark-metric-card muted">
+        <span>{label}</span>
+        <strong>{locale === "zh" ? "未运行" : "Not run"}</strong>
+        <p>{locale === "zh" ? "没有优化后轨迹。" : "No optimized trace exists."}</p>
+      </div>
+    );
+  }
+  return (
+    <div className={muted ? "benchmark-metric-card muted" : "benchmark-metric-card"}>
+      <span>{label}</span>
+      <strong>{runPassLabel(run)}</strong>
+      <p>
+        reward {run.reward ?? "-"} · NC {formatNullableRate(run.nonComplianceRate)}
+        {typeof run.finalOutputNonComplianceRate === "number" ? ` · final ${formatNullableRate(run.finalOutputNonComplianceRate)}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function DeltaMetricCard({ item }: { item: SkillsBenchShowcaseCase }) {
+  const locale = useLocale();
+  const optimized = item.optimized;
+  const nativeDelta =
+    optimized && item.original.passedTests !== null && optimized.passedTests !== null ? optimized.passedTests - item.original.passedTests : null;
+  const ncDelta =
+    optimized && item.original.nonComplianceRate !== null && optimized.nonComplianceRate !== null
+      ? item.optimized!.nonComplianceRate! - item.original.nonComplianceRate
+      : null;
+  return (
+    <div className="benchmark-metric-card delta">
+      <span>{locale === "zh" ? "变化" : "Delta"}</span>
+      <strong>
+        {nativeDelta === null ? "-" : `${nativeDelta >= 0 ? "+" : ""}${nativeDelta} ${locale === "zh" ? "测试" : "tests"}`}
+      </strong>
+      <p>{ncDelta === null ? "NC -" : `NC ${formatSignedPercent(ncDelta)}`} · {caseDecisionText(item, locale)}</p>
+    </div>
+  );
+}
+
+function FindingList({
+  title,
+  findings,
+  empty
+}: {
+  title: string;
+  findings: string[];
+  empty?: string;
+}) {
+  return (
+    <div className="benchmark-finding-list">
+      <strong>{title}</strong>
+      {findings.length ? (
+        findings.map((finding) => <p key={finding}>{finding}</p>)
+      ) : (
+        <p className="muted">{empty ?? "No findings."}</p>
+      )}
+    </div>
+  );
+}
+
+function CoveragePills({ label, counts }: { label: string; counts: SkillsBenchShowcaseCase["original"]["counts"] }) {
+  const locale = useLocale();
+  return (
+    <div className="benchmark-coverage">
+      <strong>{label}</strong>
+      <span className="covered">{statusLabel("covered", locale)} {counts.covered}</span>
+      <span className="violated">{statusLabel("violated", locale)} {counts.violated}</span>
+      <span className="missed">{statusLabel("missed", locale)} {counts.missed}</span>
+      <span className="unknown">{statusLabel("unknown", locale)} {counts.unknown}</span>
+      <span>{statusLabel("not_applicable", locale)} {counts.notApplicable}</span>
+    </div>
+  );
+}
+
+function caseStatusLabel(item: SkillsBenchShowcaseCase, locale: Locale): string {
+  if (item.status === "accepted") {
+    return locale === "zh" ? "已接受优化" : "Accepted rewrite";
+  }
+  if (item.status === "not_accepted") {
+    return locale === "zh" ? "未接受" : "Not accepted";
+  }
+  return locale === "zh" ? "环境阻塞" : "Blocked";
+}
+
+function caseDecisionText(item: SkillsBenchShowcaseCase, locale: Locale): string {
+  if (item.status === "accepted") {
+    return locale === "zh" ? "接受优化" : "accepted";
+  }
+  if (item.status === "not_accepted") {
+    return locale === "zh" ? "native 仍失败" : "native still failed";
+  }
+  return locale === "zh" ? "未运行" : "not run";
+}
+
+function runPassLabel(run: SkillsBenchShowcaseCase["original"]): string {
+  if (run.passedTests === null || run.totalTests === null) {
+    return "not run";
+  }
+  return `${run.passedTests}/${run.totalTests} tests`;
+}
+
+function formatNullableRate(value: number | null | undefined): string {
+  if (typeof value !== "number") {
+    return "-";
+  }
+  const pct = value * 100;
+  return `${pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)}%`;
+}
+
+function formatSignedPercent(value: number): string {
+  const pct = value * 100;
+  const rendered = Math.abs(pct) < 10 && pct !== 0 ? pct.toFixed(1) : String(Math.round(pct));
+  return `${pct > 0 ? "+" : ""}${rendered}%`;
 }
 
 function OpeningPanel({ skillUse }: { skillUse: LocalSkillUse }) {
