@@ -233,6 +233,13 @@ interface TraceTailState {
   error?: string;
 }
 
+interface ProcessProgressState {
+  label: string;
+  detail: string;
+  percent?: number;
+  updatedAt?: string;
+}
+
 const LocaleContext = createContext<Locale>("zh");
 
 const statusMeta: Record<
@@ -3318,6 +3325,9 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
                           <small>docker {processEvent.dockerContainers.join(", ")}</small>
                         ) : null}
                         {processEvent.tracePath ? <small>trace {formatBytes(processEvent.traceSize ?? 0)} · {processEvent.tracePath}</small> : null}
+                        {processProgressFor(processEvent, artifactTails, locale) ? (
+                          <ProcessProgressBadge progress={processProgressFor(processEvent, artifactTails, locale)!} />
+                        ) : null}
                         {processArtifactPaths(processEvent).length ? (
                           <div className="process-artifacts">
                             {processArtifactPaths(processEvent).map((artifact) => {
@@ -3370,6 +3380,21 @@ function SystemMonitorView({ onKillProcess }: { onKillProcess: (processEvent: Ag
           </div>
         </div>
       </aside>
+    </div>
+  );
+}
+
+function ProcessProgressBadge({ progress }: { progress: ProcessProgressState }) {
+  const width = progress.percent ?? 100;
+  return (
+    <div className="process-progress">
+      <div className="process-progress-meta">
+        <span>{progress.label}</span>
+        <small>{progress.detail}</small>
+      </div>
+      <div className={progress.percent === undefined ? "process-progress-bar indeterminate" : "process-progress-bar"}>
+        <span style={{ width: `${Math.max(4, Math.min(100, width))}%` }} />
+      </div>
     </div>
   );
 }
@@ -3944,6 +3969,48 @@ function processArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: s
     seen.add(artifact.path);
     return true;
   });
+}
+
+function processProgressFor(
+  processEvent: AgentProcessEvent,
+  artifactTails: Record<string, TraceTailState>,
+  locale: Locale
+): ProcessProgressState | null {
+  const artifacts = processArtifactPaths(processEvent);
+  const contents = artifacts
+    .map((artifact) => artifactTails[artifact.path])
+    .filter((tail): tail is TraceTailState => Boolean(tail?.content))
+    .map((tail) => tail.content);
+  if (!contents.length) {
+    return processEvent.status === "running" || processEvent.status === "started"
+      ? {
+          label: locale === "zh" ? "实时运行中" : "Live",
+          detail: locale === "zh" ? "等待产物更新" : "waiting for artifact updates"
+        }
+      : null;
+  }
+  const content = contents.join("\n");
+  const stepMatches = Array.from(content.matchAll(/\bstep[-_ ]?(\d+)(?:\s*\/\s*(\d+))?\b/gi));
+  const latestStep = stepMatches[stepMatches.length - 1];
+  const lines = content.split(/\r?\n/).filter((line) => line.trim());
+  const latestLine = lines[lines.length - 1]?.trim();
+  const updatedAtValues = artifacts.map((artifact) => artifactTails[artifact.path]?.updatedAt).filter(Boolean);
+  const updatedAt = updatedAtValues[updatedAtValues.length - 1];
+  if (latestStep) {
+    const current = Number(latestStep[1]);
+    const total = latestStep[2] ? Number(latestStep[2]) : undefined;
+    return {
+      label: locale === "zh" ? `进度 step ${current}${total ? `/${total}` : ""}` : `step ${current}${total ? `/${total}` : ""}`,
+      detail: latestLine ? truncate(latestLine, 96) : (locale === "zh" ? "产物实时更新" : "artifact updating"),
+      percent: total ? (current / total) * 100 : undefined,
+      updatedAt
+    };
+  }
+  return {
+    label: locale === "zh" ? `${lines.length} 条更新` : `${lines.length} updates`,
+    detail: latestLine ? truncate(latestLine, 96) : (locale === "zh" ? "产物实时更新" : "artifact updating"),
+    updatedAt
+  };
 }
 
 function detectProcessArtifactPaths(processEvent: AgentProcessEvent): Array<{ label: string; path: string; size?: number; mtime?: string }> {

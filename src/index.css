@@ -2261,6 +2261,53 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.process-progress {
+  margin-top: 8px;
+  max-width: 520px;
+}
+
+.process-progress-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.process-progress-meta span {
+  color: #1f5fbf;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.process-progress-meta small {
+  min-width: 0;
+  color: #5f6f82;
+  font-size: 11px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.process-progress-bar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6edf6;
+}
+
+.process-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1967d2;
+  transition: width 180ms ease;
+}
+
+.process-progress-bar.indeterminate span {
+  width: 42% !important;
+  background: linear-gradient(90deg, #1967d2, #2f855a);
+}
+
 .process-artifacts {
   margin-top: 8px;
   display: grid;

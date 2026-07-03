@@ -108,6 +108,7 @@ async function main() {
     assert(!afterKill.processes.some((item) => hasArtifact(item, artifactPath)), "agent process group should be stopped from the frontend");
 
     await maybeRunDockerCase();
+    await maybeRunDockerCodexExecCase();
 
     console.log("monitor smoke passed");
     console.log(`artifact: ${artifactPath}`);
@@ -237,6 +238,100 @@ wait "$child"
   }
 }
 
+async function maybeRunDockerCodexExecCase() {
+  if (!process.argv.includes("--docker")) {
+    return;
+  }
+  const name = `skillscope-monitor-codex-exec-${runId.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+  const dockerArtifact = path.join(workDir, "fake-docker-codex-exec.log");
+  const dockerBinDir = path.join(workDir, "docker-codex-bin");
+  await mkdir(dockerBinDir, { recursive: true });
+  const fakeCodexPath = path.join(dockerBinDir, "codex");
+  await writeFile(
+    fakeCodexPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+artifact="$1"
+echo "docker-codex-exec-case-start $$" >> "$artifact"
+setsid bash -lc 'artifact="$1"; docker rm -f ${name} >/dev/null 2>&1 || true; docker run -d --name ${name} alpine sh -c "i=0; echo inside-docker-codex-exec-start; while true; do i=$((i+1)); echo codex-exec-step-$i; sleep 2; done" >> "$artifact" 2>&1; echo "docker-codex-exec-container ${name}" >> "$artifact"; while true; do echo "docker-codex-host-child-alive ${name}" >> "$artifact"; sleep 2; done' bash "$artifact" &
+child=$!
+wait "$child"
+`,
+    "utf8"
+  );
+  await chmod(fakeCodexPath, 0o755);
+  const child = spawn(fakeCodexPath, [dockerArtifact], { cwd: root, detached: process.platform !== "win32", stdio: "ignore" });
+  child.unref();
+  try {
+    const dockerProcess = await waitForProcess((item) => Boolean(item.canStop) && hasArtifact(item, dockerArtifact) && JSON.stringify(item).includes(name), 45000);
+    assert(dockerProcess.dockerContainers?.includes(name), "docker codex-exec container name should be associated with the monitored child process");
+    await waitForArtifactTextAt(dockerArtifact, "docker-codex-exec-container", 45000);
+    await waitForDockerLogText(name, "inside-docker-codex-exec-start", 45000);
+    const browser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+    try {
+      await browser.screenshot(path.join(runScreenshotDir, "11-docker-codex-exec-page-loaded.png"));
+      await browser.waitForText("fake-docker-codex-exec.log", 30000);
+      await browser.evaluate(`
+        (() => {
+          const group = [...document.querySelectorAll('.agent-process-group')]
+            .find((node) => (node.textContent || '').includes('fake-docker-codex-exec.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
+          if (!group) return false;
+          group.scrollIntoView({ block: 'center' });
+          group.querySelectorAll('details').forEach((item) => { item.open = true; });
+          group.style.outline = '3px solid #805ad5';
+          return true;
+        })()
+      `);
+      await browser.screenshot(path.join(runScreenshotDir, "12-docker-codex-exec-detected.png"));
+      await browser.evaluate(`
+        (() => {
+          const group = [...document.querySelectorAll('.agent-process-group')]
+            .find((node) => (node.textContent || '').includes('fake-docker-codex-exec.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
+          const button = group?.querySelector('.process-row button.danger');
+          if (button instanceof HTMLElement) {
+            button.scrollIntoView({ block: 'center' });
+            button.style.outline = '3px solid #b42318';
+          }
+          return Boolean(button);
+        })()
+      `);
+      await browser.screenshot(path.join(runScreenshotDir, "13-docker-codex-exec-stop-before-click.png"));
+      const clicked = await browser.evaluate(`
+        (() => {
+          const group = [...document.querySelectorAll('.agent-process-group')]
+            .find((node) => (node.textContent || '').includes('fake-docker-codex-exec.log') || (node.textContent || '').includes(${JSON.stringify(name)}));
+          const groupButton = group?.querySelector('.agent-process-group-head button.danger');
+          if (groupButton) return 'unsafe-group-button';
+          const button = group?.querySelector('.process-row button.danger');
+          button?.click();
+          return button ? 'clicked-child' : 'missing-child-button';
+        })()
+      `);
+      assert(clicked.result?.value === "clicked-child", `frontend should expose only a child stop button for docker codex-exec group, got ${clicked.result?.value}`);
+      await sleep(3500);
+      await browser.screenshot(path.join(runScreenshotDir, "14-docker-codex-exec-after-stop-click.png"));
+    } finally {
+      await browser.close();
+    }
+    const running = await commandOutput("docker", ["ps", "-q", "--filter", `name=${name}`]);
+    if (running.trim()) {
+      await commandOutput("docker", ["rm", "-f", name]);
+      throw new Error("docker codex-exec container survived frontend stop");
+    }
+    const verificationBrowser = await BrowserSession.launch(`${baseUrl}/?view=monitor`);
+    try {
+      await verificationBrowser.waitForMissingText("fake-docker-codex-exec.log", 15000);
+      await verificationBrowser.screenshot(path.join(runScreenshotDir, "15-docker-codex-exec-removed-container-stopped.png"));
+    } finally {
+      await verificationBrowser.close();
+    }
+    console.log("docker codex exec smoke passed");
+  } finally {
+    killProcessGroup(child.pid);
+    await commandOutput("docker", ["rm", "-f", name]).catch(() => "");
+  }
+}
+
 async function assertServer() {
   const response = await fetch(`${baseUrl}/api/agent-processes`).catch(() => null);
   assert(response?.ok, `SkillScope dev server is not reachable at ${baseUrl}`);
@@ -287,6 +382,18 @@ async function waitForArtifactTextAt(filePath: string, expected: string, timeout
     await sleep(500);
   }
   throw new Error(`timed out waiting for artifact text: ${expected}`);
+}
+
+async function waitForDockerLogText(container: string, expected: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const text = await commandOutput("docker", ["logs", container]).catch(() => "");
+    if (text.includes(expected)) {
+      return;
+    }
+    await sleep(700);
+  }
+  throw new Error(`timed out waiting for docker log text: ${expected}`);
 }
 
 async function waitForProcessExit(pid: number | undefined, timeoutMs: number) {
